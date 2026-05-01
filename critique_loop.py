@@ -12,6 +12,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -135,7 +136,19 @@ def cmd_push(a) -> int:
     if not PAYLOAD_RE.match(a.payload):
         print(f"error: unsafe/invalid payload: {a.payload!r}", file=sys.stderr)
         return 2
-    subprocess.run(["tmux", "send-keys", "-t", a.target, "-l", a.payload], check=False)
+    # tmux send-keys -l sends one literal key event per char; Codex's Ink/React
+    # TUI does not register that as input (chars render but input state stays
+    # empty, so any subsequent Enter is a no-op). Use load-buffer + paste-buffer
+    # so tmux wraps the payload in bracketed-paste (ESC[200~ ... ESC[201~), which
+    # Codex accepts as a single paste block, then send Enter to submit.
+    buf = f"critique-loop-{os.getpid()}"
+    subprocess.run(
+        ["tmux", "load-buffer", "-b", buf, "-"],
+        input=a.payload, text=True, check=False,
+    )
+    subprocess.run(["tmux", "paste-buffer", "-b", buf, "-t", a.target], check=False)
+    subprocess.run(["tmux", "delete-buffer", "-b", buf], check=False)
+    time.sleep(0.3)
     subprocess.run(["tmux", "send-keys", "-t", a.target, "Enter"], check=False)
     print(json.dumps({"ok": True}))
     return 0

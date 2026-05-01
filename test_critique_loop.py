@@ -85,24 +85,47 @@ def test_prompt_writes_file_with_protocol_header(monkeypatch, cache_root: Path):
     assert "content X" in body
 
 
-def test_push_uses_argv_subprocess(monkeypatch, cache_root: Path):
-    calls: list[list[str]] = []
+def test_push_uses_bracketed_paste_via_tmux_buffer(monkeypatch, cache_root: Path):
+    """Payload must arrive as a single bracketed-paste so Codex's Ink/React TUI
+    actually registers it as input. send-keys -l does NOT work for that TUI.
+    """
+    calls: list[tuple[list[str], dict]] = []
+    sleeps: list[float] = []
 
     def fake(argv, **kw):
-        calls.append(argv)
+        calls.append((argv, kw))
         class R: stdout = ""; returncode = 0
         return R()
 
+    monkeypatch.setattr(cl.time, "sleep", lambda s: sleeps.append(s))
+
+    payload = "@run-x/prompt-r1.md [critique-loop r=1]"
     rc, out, _ = _run(
         monkeypatch, cache_root,
         "push", "--target", "%6",
-        "--payload", "@run-x/prompt-r1.md [critique-loop r=1]",
+        "--payload", payload,
         fake_subproc=fake,
     )
     assert rc == 0
-    assert calls[0] == ["tmux", "send-keys", "-t", "%6", "-l",
-                        "@run-x/prompt-r1.md [critique-loop r=1]"]
-    assert calls[1] == ["tmux", "send-keys", "-t", "%6", "Enter"]
+
+    # 1) load-buffer reads payload from stdin into a named buffer
+    argv0, kw0 = calls[0]
+    assert argv0[0:3] == ["tmux", "load-buffer", "-b"]
+    assert argv0[-1] == "-"
+    assert kw0.get("input") == payload
+    buf = argv0[3]
+
+    # 2) paste-buffer pastes that buffer into the target pane (bracketed)
+    assert calls[1][0] == ["tmux", "paste-buffer", "-b", buf, "-t", "%6"]
+
+    # 3) cleanup
+    assert calls[2][0] == ["tmux", "delete-buffer", "-b", buf]
+
+    # 4) sleep so paste settles before Enter
+    assert sleeps, "must sleep between paste and submit"
+
+    # 5) Enter submits
+    assert calls[3][0] == ["tmux", "send-keys", "-t", "%6", "Enter"]
 
 
 def test_push_rejects_payload_with_dangerous_chars(monkeypatch, cache_root: Path):
