@@ -2,11 +2,10 @@
 name: critique-loop
 version: 0.1.0
 description: |
-  Adversarial review loop between this Claude pane and a sibling Codex CLI pane in
-  the same tmux window. Claude orchestrates N rounds: writes a prompt file, wakes
-  Codex via tmux send-keys, sleeps with ScheduleWakeup, parses the critique, and
-  either continues or synthesizes a final report. Codex receives a self-contained
-  protocol in each prompt — no pre-install needed on the Codex side.
+  같은 tmux 윈도우 안의 Claude pane과 Codex CLI pane 간 적대적 리뷰 루프.
+  Claude가 N 라운드를 오케스트레이션한다: 프롬프트 파일 작성 → tmux paste-buffer로
+  Codex 깨우기 → ScheduleWakeup으로 슬립 → 비평 파싱 → 계속 진행 또는 합성 보고서 출력.
+  각 프롬프트에 self-contained 프로토콜이 포함되어 있어 Codex 측 사전 설치 불필요.
 triggers:
   - critique loop
   - codex review loop
@@ -21,90 +20,90 @@ allowed-tools:
   - AskUserQuestion
 ---
 
-# critique-loop — Claude orchestration procedure
+# critique-loop — Claude 오케스트레이션 절차
 
-> Read this top-to-bottom **before** running anything. The procedure is rigid: file writes, tmux pushes, and ScheduleWakeup hand-offs must happen in the exact order described. Skipping the health check or short-circuiting the wake-loop will silently break runs.
+> **실행 전에 처음부터 끝까지 읽을 것.** 절차는 엄격하다: 파일 쓰기, tmux push, ScheduleWakeup 핸드오프는 설명된 순서 그대로 수행해야 한다. health check를 건너뛰거나 wake 루프를 단축하면 조용히 실패한다.
 
-## When this skill applies
+## 이 스킬이 적용되는 경우
 
-Invoke when the user asks for an adversarial Codex review of code, a diff, a spec, or free text — typically via `/critique-loop`, "critique loop", "codex review loop", or Korean equivalents.
+사용자가 코드, diff, 스펙, 또는 자유 텍스트에 대한 적대적 Codex 리뷰를 요청할 때 — 보통 `/critique-loop`, "critique loop", "codex review loop", 또는 한국어 동의어로 호출.
 
-**Pre-conditions** (verify before step 1; abort with a concrete fix if any fail):
+**사전 조건** (Step 1 전에 확인; 하나라도 실패하면 구체적인 해결책과 함께 중단):
 
-- `tmux` is reachable (running inside tmux): `tmux display-message -p '#{pane_id}'` succeeds.
-- A sibling pane in the **same window** is running `codex`. (Pane discovery, §Procedure step 1.)
-- The Codex pane is in **default mode**, not Plan mode. (Codex must be allowed to write files. Health check catches this; if it fails, instruct user to `shift-tab` out of Plan mode and re-run with `--resume`.)
-- `python3` is on PATH.
+- `tmux`에 접근 가능 (tmux 안에서 실행 중): `tmux display-message -p '#{pane_id}'` 성공.
+- **같은 윈도우**의 sibling pane에서 `codex`가 실행 중. (Pane discovery, §절차 Step 1.)
+- Codex pane이 **default mode** (Plan mode 아님). Codex가 파일을 써야 한다. health check이 이를 잡는다; 실패하면 사용자에게 `shift-tab`으로 Plan mode 해제 후 `--resume`으로 재실행 안내.
+- `python3`이 PATH에 있음.
 
-## CLI surface (what the user types)
+## CLI 사용법 (사용자가 입력하는 것)
 
 ```text
-/critique-loop                           # review prior Claude message/proposal
-/critique-loop <file>                    # review file contents
-/critique-loop --diff                    # review `git diff <base>...HEAD` of current branch
-/critique-loop "free text proposal"      # review literal text
-/critique-loop --rounds N <input>        # override max_rounds (1..10, default 3)
-/critique-loop --codex-pane <pane_id> <input>   # explicit pane (e.g. %23)
-/critique-loop --no-health <input>       # ⚠ skip round-0 health check (unsafe; debug only)
-/critique-loop --resume <run_id>         # resume an interrupted run
-/critique-loop --health                  # standalone health check, no review
-/critique-loop --list                    # list recent run_ids
-/critique-loop --show <run_id>           # re-print synthesis for a past run
+/critique-loop                           # 직전 Claude 메시지/제안 리뷰
+/critique-loop <file>                    # 파일 내용 리뷰
+/critique-loop --diff                    # 현 브랜치 diff vs base 리뷰
+/critique-loop "자유 텍스트 제안"          # 자유 텍스트 리뷰
+/critique-loop --rounds N <input>        # max_rounds 오버라이드 (1..10, 기본 3)
+/critique-loop --codex-pane <pane_id> <input>   # pane 명시 (예: %23)
+/critique-loop --no-health <input>       # ⚠ round-0 health check 생략 (unsafe; 디버그 전용)
+/critique-loop --resume <run_id>         # 중단된 run 재개
+/critique-loop --health                  # standalone health check, 리뷰 없음
+/critique-loop --list                    # 최근 run_id 목록
+/critique-loop --show <run_id>           # 과거 run의 합성 보고서 재출력
 ```
 
-Defaults: `max_rounds=3`, `watchdog_total=300s` (per round), `health=on`.
+기본값: `max_rounds=3`, `watchdog_total=300s` (라운드당), `health=on`.
 
-## Backing CLI
+## 백킹 CLI
 
-The Python implementation lives next to this file. Use this prefix in every Bash call:
+Python 구현체가 이 파일 옆에 있다. 모든 Bash 호출에서 다음 형식 사용:
 
 ```bash
 CL="python3 \"$HOME/.claude/skills/critique-loop/critique_loop.py\""
 ```
 
-Subcommands (all emit single-line JSON on stdout, errors on stderr):
+서브커맨드 (모두 stdout에 단일 JSON 줄 출력, 에러는 stderr):
 
-| Subcommand | Purpose |
+| 서브커맨드 | 용도 |
 |---|---|
-| `pane-discover` | Find the sibling codex pane in the current window |
-| `init --max-rounds N --codex-pane PID --input-source S --input-body B` | Create run dir + `state.json`; prints `{run_id, run_dir}` |
-| `health-prompt --run-id RID` | Write `prompt-r0.md` (PONG ping) |
-| `health-check --run-id RID` | Read `critique-r0.md`; prints `{ok, diagnosis}` |
-| `prompt --run-id RID --round N [--prior-summary S]` | Write `prompt-rN.md` |
-| `push --target PID --payload P` | `tmux send-keys -l` + `Enter` to wake Codex (payload validated against allowlist regex) |
-| `check --run-id RID --round N` | Inspect `critique-rN.md`; prints `{state: pending|done, verdict?: continue|done|unknown}` |
-| `synthesize --run-id RID` | Concatenate all critiques into a single human-readable report |
-| `list` | List run_ids (newest first) |
-| `state --run-id RID` | Print full `state.json` |
+| `pane-discover` | 현재 윈도우에서 sibling codex pane 찾기 |
+| `init --max-rounds N --codex-pane PID --input-source S --input-body B` | run 디렉토리 + `state.json` 생성; `{run_id, run_dir}` 출력 |
+| `health-prompt --run-id RID` | `prompt-r0.md` (PONG ping) 작성 |
+| `health-check --run-id RID` | `critique-r0.md` 읽기; `{ok, diagnosis}` 출력 |
+| `prompt --run-id RID --round N [--prior-summary S]` | `prompt-rN.md` 작성 |
+| `push --target PID --payload P` | bracketed-paste로 Codex 깨우기 (payload를 allowlist 정규식으로 검증) |
+| `check --run-id RID --round N` | `critique-rN.md` 검사; `{state: pending|done, verdict?: continue|done|unknown}` 출력 |
+| `synthesize --run-id RID` | 모든 비평을 단일 사람이 읽을 수 있는 보고서로 연결 |
+| `list` | run_id 목록 (최신순) |
+| `state --run-id RID` | 전체 `state.json` 출력 |
 
-## Procedure
+## 절차
 
-### Step 1 — Resolve input
+### Step 1 — 입력 resolve
 
-Decide `(input_source, input_body)` from the user's invocation:
+사용자 호출 형태에 따라 `(input_source, input_body)` 결정:
 
-| Form | `input_source` | `input_body` |
+| 형태 | `input_source` | `input_body` |
 |---|---|---|
-| `/critique-loop` (no arg) | `prior-message` | text of the immediately prior Claude message/proposal |
-| `/critique-loop <path>` | `<path>` | `Read` the file (use the Read tool, not `cat`) |
-| `/critique-loop --diff` | `git-diff` | output of `git diff "$(git merge-base HEAD main)...HEAD"` (try `master` if `main` absent) |
-| `/critique-loop "..."` | `inline-text` | the quoted text verbatim |
+| `/critique-loop` (인자 없음) | `prior-message` | 직전 Claude 메시지/제안 텍스트 |
+| `/critique-loop <path>` | `<path>` | 파일 읽기 (Read 툴 사용, `cat` 아님) |
+| `/critique-loop --diff` | `git-diff` | `git diff "$(git merge-base HEAD main)...HEAD"` 출력 (`main` 없으면 `master` 시도) |
+| `/critique-loop "..."` | `inline-text` | 따옴표 안의 텍스트 그대로 |
 
-If the resolved body is empty or > ~200 KB, ask the user (`AskUserQuestion`) to confirm or narrow before proceeding.
+resolved body가 비어있거나 ~200 KB 초과이면 진행 전 `AskUserQuestion`으로 사용자에게 확인.
 
-For `--health`, `--list`, `--show`, `--resume` — skip directly to the matching branch below.
+`--health`, `--list`, `--show`, `--resume` — 해당 브랜치로 바로 이동.
 
-### Step 2 — Discover the Codex pane
+### Step 2 — Codex pane 찾기
 
 ```bash
 eval "$CL pane-discover"
 ```
 
-- `0` exit + `{"codex_pane": "%N"}` → use it.
-- Non-zero exit + "no codex pane" → tell user: "Open a Codex CLI in a sibling pane of this tmux window, then re-run." Abort.
-- Non-zero exit + "multiple codex panes" → ask the user via `AskUserQuestion` for the explicit pane id, then proceed as if `--codex-pane` was given.
+- exit 0 + `{"codex_pane": "%N"}` → 사용.
+- non-zero + "no codex pane" → 사용자에게: "이 tmux 윈도우의 sibling pane에 Codex CLI를 열고 재실행하세요." 중단.
+- non-zero + "multiple codex panes" → `AskUserQuestion`으로 pane id 확인 후 `--codex-pane`으로 지정된 것처럼 진행.
 
-If the user passed `--codex-pane <pid>`, skip discovery and use that value (still validate with `tmux list-panes -F '#{pane_id}'` first).
+사용자가 `--codex-pane <pid>`를 전달한 경우 discovery 건너뜀 (단, `tmux list-panes -F '#{pane_id}'`로 존재 확인은 필요).
 
 ### Step 3 — `init`
 
@@ -113,55 +112,55 @@ eval "$CL init --max-rounds 3 --codex-pane '%N' \
   --input-source 'src/foo.py' --input-body \"$(cat /tmp/cl-input.txt)\""
 ```
 
-Pass the body via a temp file or process substitution — never inline a multi-KB string into the shell command. Capture the JSON output; remember `run_id` for the rest of the run.
+body는 임시 파일이나 process substitution으로 전달 — 수 KB 문자열을 셸 명령에 인라인으로 넣지 말 것. JSON 출력을 캡처하고 `run_id`를 run 전체에서 기억.
 
 ### Step 4 — Health check (round 0)
 
-Skip iff the user passed `--no-health`. Otherwise this is mandatory: it validates the wake channel before consuming a real round.
+사용자가 `--no-health`를 전달한 경우만 건너뜀. 그 외에는 필수: 실제 라운드를 소비하기 전에 wake 채널을 검증한다.
 
 ```bash
 eval "$CL health-prompt --run-id $RID"
-# returns {"prompt_path": "<rid>/prompt-r0.md"}
+# {"prompt_path": "<rid>/prompt-r0.md"} 반환
 eval "$CL push --target '%N' --payload '@<rid>/prompt-r0.md [critique-loop run=<rid> round=0]'"
 ```
 
-Then **end your turn with `ScheduleWakeup`**:
+그 다음 **`ScheduleWakeup`으로 턴 종료**:
 
 - `delaySeconds: 30`
-- `prompt`: re-invoke this skill in resume mode, e.g. `/critique-loop --resume <rid>` with a note that you're in the health phase.
-- `reason`: "waiting for Codex health PONG".
+- `prompt`: resume 모드로 이 스킬 재호출, 예: `/critique-loop --resume <rid>` + health 단계임을 표시하는 메모.
+- `reason`: "Codex health PONG 대기 중".
 
-On wake-up:
+깨어난 후:
 
 ```bash
 eval "$CL health-check --run-id $RID"
 ```
 
-- `{"ok": true}` → proceed to Step 5 (Round 1).
-- `{"ok": false, "diagnosis": "..."}` → report diagnosis to the user with one of these recoveries, then abort:
-  - "no critique-r0.md yet" → "Codex didn't respond. Confirm the pane is the right one, that Codex is in default (not Plan) mode, and re-run `/critique-loop --resume <rid>`."
-  - "unexpected health response" → "Codex pane responded but didn't follow the protocol. Confirm the pane is actually running Codex CLI."
-  - Allow **one** retry: re-push the same prompt and ScheduleWakeup(30s) once more before declaring failure.
+- `{"ok": true}` → Step 5 (Round 1)로 진행.
+- `{"ok": false, "diagnosis": "..."}` → 진단 내용과 함께 다음 중 하나로 사용자에게 보고 후 중단:
+  - "no critique-r0.md yet" → "Codex가 응답하지 않음. pane이 맞는지, Codex가 default (not Plan) mode인지 확인 후 `/critique-loop --resume <rid>` 재실행."
+  - "unexpected health response" → "Codex pane이 응답했지만 프로토콜을 따르지 않음. 해당 pane이 실제로 Codex CLI인지 확인."
+  - **1회 재시도** 허용: 실패 선언 전에 같은 프롬프트를 다시 push하고 ScheduleWakeup(30s) 한 번 더.
 
-### Step 5 — Round N loop (N = 1..max_rounds)
+### Step 5 — Round N 루프 (N = 1..max_rounds)
 
-For each round:
+각 라운드:
 
-**5a. Build prior summary.** Concatenate prior critiques into a short context block. Keep it terse — Codex will re-read everything from the prompt file:
+**5a. prior summary 작성.** 이전 비평을 짧은 컨텍스트 블록으로 요약. 간결하게 — Codex는 프롬프트 파일에서 모든 내용을 다시 읽는다:
 
 ```text
-Round 1 verdict: continue (3 findings, 1 critical)
-Top issue: <title from round 1>
-... (only enough so Codex doesn't re-flag the same thing)
+Round 1 verdict: continue (findings 3개, critical 1개)
+주요 이슈: <round 1 제목>
+... (Codex가 같은 걸 다시 지적하지 않을 만큼만)
 ```
 
-Pass via `--prior-summary`. For round 1, omit it or pass `""`.
+`--prior-summary`로 전달. Round 1은 생략하거나 `""`로.
 
-**5b. Write the prompt.**
+**5b. 프롬프트 작성.**
 
 ```bash
 eval "$CL prompt --run-id $RID --round $N --prior-summary \"$SUMMARY\""
-# returns {"prompt_path": "<rid>/prompt-rN.md"}
+# {"prompt_path": "<rid>/prompt-rN.md"} 반환
 ```
 
 **5c. Push.**
@@ -170,56 +169,56 @@ eval "$CL prompt --run-id $RID --round $N --prior-summary \"$SUMMARY\""
 eval "$CL push --target '%N' --payload '@<rid>/prompt-rN.md [critique-loop run=<rid> round=N]'"
 ```
 
-`push` rejects any payload that doesn't match `^@[A-Za-z0-9_./-]+ \[critique-loop [A-Za-z0-9_=. -]+\]$`. If you see exit code 2, you constructed the payload wrong — fix it; do **not** bypass.
+`push`는 `^@[A-Za-z0-9_./-]+ \[critique-loop [A-Za-z0-9_=. -]+\]$`에 매칭되지 않는 payload를 거부한다. exit code 2가 나오면 payload 구성이 잘못된 것 — 수정할 것. **우회 금지**.
 
-**5d. End turn with ScheduleWakeup.**
+**5d. ScheduleWakeup으로 턴 종료.**
 
 - `delaySeconds: 60`
-- `prompt`: `/critique-loop --resume <rid>` with current round.
-- `reason`: "waiting for Codex round N critique".
+- `prompt`: 현재 라운드를 포함한 `/critique-loop --resume <rid>`.
+- `reason`: "Codex round N 비평 대기 중".
 
-**5e. On wake-up — check.**
+**5e. 깨어난 후 — check.**
 
 ```bash
 eval "$CL check --run-id $RID --round $N"
 ```
 
-Branch on the JSON:
+JSON에 따라 분기:
 
-| `state` | `verdict` | Action |
+| `state` | `verdict` | 액션 |
 |---|---|---|
-| `pending` | — | Codex hasn't written yet. If total elapsed for this round < 300s, ScheduleWakeup(60s) again. If ≥ 300s, treat as **watchdog timeout**: report to user with `--resume <rid>` recovery and abort. |
-| `done` | `done` | Early termination. Skip remaining rounds and go to Step 6 (synthesis). |
-| `done` | `continue` | If `N < max_rounds`, proceed to round `N+1` (back to 5a). If `N == max_rounds`, go to Step 6 and note "max rounds reached, findings unresolved". |
-| `done` | `unknown` | Codex wrote a critique but the last line wasn't a valid `VERDICT:` directive. Treat conservatively as `continue`; in the final synthesis, flag the unparseable verdict so the user knows. |
+| `pending` | — | Codex가 아직 쓰지 않음. 이 라운드의 총 경과 시간 < 300s이면 ScheduleWakeup(60s) 재예약. ≥ 300s이면 **watchdog timeout**: 사용자에게 `--resume <rid>` 복구 방법과 함께 보고 후 중단. |
+| `done` | `done` | 조기 종료. 남은 라운드 건너뛰고 Step 6 (합성)으로. |
+| `done` | `continue` | `N < max_rounds`이면 round `N+1`로 (5a로 돌아감). `N == max_rounds`이면 Step 6으로, "max rounds 도달, finding 미해결" 명시. |
+| `done` | `unknown` | Codex가 비평을 썼지만 마지막 줄이 유효한 `VERDICT:` 지시어가 아님. 보수적으로 `continue`로 처리; 최종 합성에서 파싱 불가 verdict를 사용자에게 표시. |
 
-Track elapsed time per round by remembering when you first scheduled the wake; the wake `prompt` should carry enough context (round number + first-wake timestamp) for you to reason about the watchdog.
+라운드당 경과 시간은 첫 wake 예약 시점을 기억해서 추적; wake `prompt`에 (라운드 번호 + 첫 wake 타임스탬프)를 포함시켜 watchdog 판단 가능하게 할 것.
 
-### Step 6 — Synthesize
+### Step 6 — 합성
 
 ```bash
 eval "$CL synthesize --run-id $RID"
 ```
 
-Print the output to the user verbatim, then add a short Claude-authored coda:
+출력을 사용자에게 그대로 표시한 다음 Claude가 작성한 짧은 후기 추가:
 
-- Total rounds run vs. max
-- Whether termination was early (verdict=done) or by max_rounds
-- Per-finding **classification** following the SPEC §5.5 default policy:
-  - `critical`/`high` → **Accepted** (unless evidence is wrong → Rejected with reason)
-  - `medium` → **Accepted** unless out-of-scope (then Deferred + reason)
-  - `low`/`nit` → **Deferred** unless trivially valuable (then Accepted)
-  - Rejected always requires a reason. If a finding is genuinely ambiguous, ask the user (a/r/d) once via `AskUserQuestion`.
-- Artifacts path: `~/.claude/cache/critique-loop/<run_id>/`
-- How to re-run: `/critique-loop --resume <run_id>`
+- 진행한 라운드 수 vs. max
+- 종료가 조기(verdict=done)였는지, max_rounds 도달이었는지
+- Finding별 **분류** (SPEC §5.5 기본 정책):
+  - `critical`/`high` → **Accepted** (근거가 틀렸으면 → Rejected + 이유 필수)
+  - `medium` → **Accepted** (범위 밖이면 Deferred + 이유)
+  - `low`/`nit` → **Deferred** (즉각 가치가 명백하면 Accepted)
+  - Rejected는 항상 이유 필수. 분류가 모호하면 `AskUserQuestion`으로 1회 (a/r/d) 확인.
+- 산출물 경로: `~/.claude/cache/critique-loop/<run_id>/`
+- 재실행 방법: `/critique-loop --resume <run_id>`
 
-**Do not auto-apply fixes.** v0.1.0's output is the report; code changes are out of scope.
+**자동 수정 금지.** v0.1.0의 산출물은 보고서까지; 코드 변경은 범위 밖.
 
-## Branches for non-review invocations
+## 리뷰 외 호출 브랜치
 
 ### `--health` (standalone)
 
-Steps 1–4 only. After health-check passes (or fails), report and stop. No init for a real review — you can call `init` with a tiny placeholder body just to get a run_id, since `health-prompt` requires one.
+Step 1–4만. health-check 통과(또는 실패) 후 보고하고 종료. 실제 리뷰용 init 없음 — `health-prompt`에 run_id가 필요하므로 플레이스홀더 body로 `init` 호출 가능.
 
 ### `--list`
 
@@ -227,7 +226,7 @@ Steps 1–4 only. After health-check passes (or fails), report and stop. No init
 eval "$CL list"
 ```
 
-Print the JSON array as a friendly numbered list to the user.
+JSON 배열을 친절한 번호 목록으로 사용자에게 출력.
 
 ### `--show <run_id>`
 
@@ -235,47 +234,47 @@ Print the JSON array as a friendly numbered list to the user.
 eval "$CL synthesize --run-id <run_id>"
 ```
 
-Validate the run_id format first (must match `^run-\d{8}-\d{6}-[0-9a-f]{6}$`); the CLI also rejects invalid forms.
+먼저 run_id 형식 확인 (반드시 `^run-\d{8}-\d{6}-[0-9a-f]{6}$` 매칭); CLI도 유효하지 않은 형식을 거부한다.
 
 ### `--resume <run_id>`
 
-1. `eval "$CL state --run-id <run_id>"` → read current `round`, `max_rounds`, `codex_pane`, `input_source`.
-2. Look at the run dir (`~/.claude/cache/critique-loop/<run_id>/`) and find the highest `prompt-rK.md` and the highest `critique-rK.md`.
-3. If `critique-rK.md` exists for the latest prompt → call `check` and continue from Step 5e for round K.
-4. If only `prompt-rK.md` exists → re-push it and ScheduleWakeup(60s).
-5. If neither (or only round 0) → restart the round that was in flight from Step 5b.
+1. `eval "$CL state --run-id <run_id>"` → 현재 `round`, `max_rounds`, `codex_pane`, `input_source` 읽기.
+2. run 디렉토리(`~/.claude/cache/critique-loop/<run_id>/`)에서 가장 높은 `prompt-rK.md`와 `critique-rK.md` 탐색.
+3. 최신 프롬프트에 대한 `critique-rK.md`가 존재하면 → `check` 호출 후 round K에 대해 Step 5e 계속.
+4. `prompt-rK.md`만 있으면 → 다시 push하고 ScheduleWakeup(60s).
+5. 둘 다 없으면 (또는 round 0만) → 진행 중이던 라운드를 Step 5b부터 재시작.
 
-Resume must not start a new run_id and must not re-`init`.
+Resume은 새 run_id를 만들지 않으며 `init`을 재실행하지 않는다.
 
-## Error handling
+## 에러 처리
 
-| Symptom | Cause | Action |
+| 증상 | 원인 | 처리 |
 |---|---|---|
-| `pane-discover` finds 0 codex panes | Codex not running in this window | Tell user; abort. |
-| `pane-discover` finds 2+ codex panes | Multiple Codex sessions | `AskUserQuestion` to pick one; record as `--codex-pane`. |
-| Health round-0 PONG missing after 30s + 30s retry | Codex in Plan mode, wrong pane, or stuck TUI | Diagnose per `health-check.diagnosis`; abort with `--resume` recovery hint. |
-| `push` exit code 2 ("unsafe/invalid payload") | You built the payload wrong | Reconstruct with the exact format `@<rid>/prompt-rN.md [critique-loop run=<rid> round=N]`. Never disable validation. |
-| `check` keeps returning `pending` past 300s | Codex hung or ignored the wake | Watchdog timeout: report and abort with `--resume <rid>` hint. Do not loop forever. |
-| `check` returns `verdict=unknown` | Codex didn't end with `VERDICT: continue|done` | v0.1 has no schema repair. Treat as `continue` (one extra round) and flag in synthesis. |
-| User Ctrl-C mid-loop | — | The next `/critique-loop --resume <rid>` picks up where the state.json left off. |
+| `pane-discover`가 codex pane 0개 | 이 윈도우에 Codex 미실행 | 사용자에게 안내; 중단. |
+| `pane-discover`가 2개 이상 | Codex 세션 복수 | `AskUserQuestion`으로 선택; `--codex-pane`으로 기록. |
+| Health round-0 PONG 30s + 30s 재시도 후 없음 | Plan mode, 잘못된 pane, 또는 TUI 멈춤 | `health-check.diagnosis`에 따라 진단; `--resume` 복구 힌트와 함께 중단. |
+| `push` exit code 2 ("unsafe/invalid payload") | payload 구성 오류 | 정확한 형식 `@<rid>/prompt-rN.md [critique-loop run=<rid> round=N]`으로 재구성. 검증 우회 금지. |
+| `check`가 300s 이상 계속 `pending` 반환 | Codex 응답 없음 또는 wake 무시 | Watchdog timeout: `--resume <rid>` 힌트와 함께 보고 후 중단. 무한 루프 금지. |
+| `check`가 `verdict=unknown` 반환 | Codex가 `VERDICT: continue|done` 없이 종료 | v0.1에는 schema repair 없음. `continue`로 처리 (라운드 1회 추가)하고 합성에서 표시. |
+| 사용자 Ctrl-C | — | `/critique-loop --resume <rid>`로 state.json에서 중단된 지점 재개 가능. |
 
-## Safety constraints (do not violate)
+## 안전 제약 (위반 금지)
 
-- **Push payload format is enforced by the CLI.** `push` rejects anything that doesn't match the allowlist regex. Don't try to embed arbitrary user input or arbitrary paths in the payload — only `@<rid>/prompt-rN.md` and `[critique-loop run=<rid> round=N]` are allowed.
-- **`max_rounds` ≤ 10.** If the user asks for more, refuse and explain.
-- **All cache lives under `~/.claude/cache/critique-loop/<run_id>/`.** Never write outside this tree from the orchestration layer.
-- **Run_id format is enforced** as `^run-\d{8}-\d{6}-[0-9a-f]{6}$`. If a user passes anything else to `--resume`/`--show`, refuse.
-- **Protected files** (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules/*`, `.env*`, `*.lock`, `secrets.*`) — Codex may *report* on them but Claude must not auto-apply suggestions. v0.1.0 doesn't auto-apply anything anyway, but flag clearly in the synthesis report if any critique recommends edits to a protected path.
-- **tmux invocations are argv-based.** The CLI already does this. If you ever construct a `tmux` command yourself, use `subprocess.run([...])` form (or `tmux <subcommand> -- <arg>` style), never shell strings.
+- **Push payload 형식은 CLI가 강제한다.** `push`는 allowlist 정규식에 매칭되지 않는 것을 거부. 임의 사용자 입력이나 임의 경로를 payload에 끼워넣으려 하지 말 것 — `@<rid>/prompt-rN.md`와 `[critique-loop run=<rid> round=N]`만 허용.
+- **`max_rounds` ≤ 10.** 사용자가 더 많이 요청하면 거부하고 설명.
+- **모든 캐시는 `~/.claude/cache/critique-loop/<run_id>/` 하위에만.** 오케스트레이션 레이어에서 이 트리 밖에 쓰지 말 것.
+- **Run_id 형식 강제** `^run-\d{8}-\d{6}-[0-9a-f]{6}$`. `--resume`/`--show`에 다른 형식이 오면 거부.
+- **Protected files** (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules/*`, `.env*`, `*.lock`, `secrets.*`) — Codex가 *보고*는 할 수 있지만 Claude가 자동 적용 금지. v0.1.0은 어차피 자동 적용이 없지만, 비평이 protected 경로 수정을 권장하면 합성 보고서에 명시.
+- **tmux 호출은 argv 기반.** CLI가 이미 그렇게 한다. 직접 `tmux` 명령을 구성할 일이 생기면 `subprocess.run([...])` 형식 사용, 셸 문자열 금지.
 
-## v0.1.0 deltas from SPEC.md
+## v0.1.0과 SPEC.md 차이
 
-This skill matches `critique_loop.py` v0.1.0, which deliberately simplifies SPEC.md:
+이 스킬은 `critique_loop.py` v0.1.0에 맞춰져 있으며, SPEC.md를 의도적으로 단순화함:
 
-- State file is `state.json`, not `manifest.json` (no v2 manifest schema).
-- Critiques are free-form markdown ending with a `VERDICT: continue|done` line — not 6-field JSON.
-- Health response is the literal text `PONG` in `critique-r0.md`, not `{"ping": "pong"}` JSON.
-- No `.tmp` + rename + `.done` sentinel protocol — plain file writes.
-- No `events.jsonl`, no per-finding accept/reject persistence, no schema repair, no `request_id` nonce verification.
+- 상태 파일은 `state.json` (manifest.json v2 스키마 없음).
+- 비평은 `VERDICT: continue|done` 줄로 끝나는 자유형 마크다운 — 6-field JSON 아님.
+- Health 응답은 `critique-r0.md`의 리터럴 텍스트 `PONG` — `{"ping": "pong"}` JSON 아님.
+- `.tmp` + rename + `.done` sentinel 프로토콜 없음 — 단순 파일 쓰기.
+- `events.jsonl`, finding별 accept/reject 영속성, schema repair, `request_id` nonce 검증 없음.
 
-When in doubt about behaviour, **trust the CLI** (`critique_loop.py`) over SPEC.md. SPEC.md is the future target; v0.1.0 is the dogfood floor.
+동작이 SPEC.md와 다르면 **CLI (`critique_loop.py`)를 기준**으로 삼는다. SPEC.md는 목표 형태, v0.1.0은 dogfood 최소 바닥.

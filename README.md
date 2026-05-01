@@ -1,140 +1,141 @@
 # critique-loop
 
-Adversarial review loop between a Claude Code pane and a Codex CLI pane in the same tmux window.
+같은 tmux 윈도우 안의 Claude Code pane과 Codex CLI pane이 적대적 코드 리뷰를 주고받는 스킬.
 
-You hand Claude a file, a `git diff`, or some text. Claude writes a prompt to disk, wakes Codex via `tmux send-keys`, sleeps, then reads Codex's critique back. Repeat for N rounds with early termination, then Claude synthesizes the findings into a single report.
+파일, `git diff`, 또는 자유 텍스트를 넘기면 Claude가 프롬프트를 디스크에 쓰고, `tmux paste-buffer`로 Codex를 깨우고, 잠든 뒤 Codex의 비평을 읽는다. N 라운드 반복하다 조기 종료 조건 충족 시 합성 보고서를 출력한다.
 
-Both panes stay visible. You watch the review happen.
+두 pane 모두 화면에 그대로 보인다. 리뷰가 실시간으로 진행되는 걸 눈으로 확인할 수 있다.
 
-## What it does
+## 동작 방식
 
 ```text
 ┌──────────────── Claude pane ──────────────────┐    ┌─────── Codex pane ────────┐
 │  /critique-loop src/foo.py                     │    │   (idle)                  │
 │                                                │    │                           │
 │  init → run_id=run-20260501-150000-a3f9b2     │    │                           │
-│  prompt-r1.md written                          │    │                           │
-│  wake push ─────────────────────────────────────►   │  reads prompt-r1.md       │
-│  ScheduleWakeup(60s) ... (turn ends)           │    │  writes critique-r1.md    │
+│  prompt-r1.md 작성                              │    │                           │
+│  wake push ─────────────────────────────────────►   │  prompt-r1.md 읽음        │
+│  ScheduleWakeup(60s) ... (턴 종료)              │    │  critique-r1.md 작성      │
 │                                                │    │                           │
-│  wakes; check → done, verdict=continue         │    │                           │
-│  prompt-r2.md ... (loop)                       │    │                           │
+│  깨어남; check → done, verdict=continue        │    │                           │
+│  prompt-r2.md ... (루프)                       │    │                           │
 │                                                │    │                           │
-│  synthesis → final report                      │    │                           │
+│  synthesis → 최종 보고서                        │    │                           │
 └────────────────────────────────────────────────┘    └───────────────────────────┘
 ```
 
-The Codex side needs no install. Each prompt file carries the protocol contract Codex needs to respond — Codex just reads the file you `@`-referenced and writes the markdown critique you asked for.
+Codex 쪽에는 별도 설치가 없어도 된다. 각 프롬프트 파일에 프로토콜 계약이 self-contained로 포함되어 있어서 Codex는 `@`-참조된 파일을 읽고 요청된 형식으로 비평을 쓰면 끝이다.
 
-## Requirements
+## 요구사항
 
-- **tmux** ≥ 3.0, and you must be running inside it.
-- **Codex CLI** in a sibling pane of the same tmux window. **Default mode**, not Plan mode (Codex needs to write files). One Codex pane per window — multiple panes will trigger an interactive picker.
-- **Python 3.13+** on `PATH`. (Tested on 3.14.)
-- **Claude Code** with `ScheduleWakeup` available — the orchestration relies on time-based hand-offs.
+- **tmux** ≥ 3.0, tmux 세션 안에서 실행 중이어야 함.
+- **Codex CLI** — 같은 tmux 윈도우의 sibling pane에서 실행 중. **default mode** (Plan mode 아님 — Codex가 파일을 써야 함). 윈도우당 Codex pane 1개. 2개 이상이면 대화식 선택기가 뜬다.
+- **Python 3.13+** on `PATH`. (3.14에서 테스트.)
+- **Claude Code** — `ScheduleWakeup` 사용 가능해야 함. 오케스트레이션이 시간 기반 핸드오프에 의존함.
 
-For development:
+개발 시:
 
-- `pytest` ≥ 8.4 to run the test suite.
+- `pytest` ≥ 8.4 (테스트 실행 용)
 
-## Install
+## 설치
 
 ```bash
-# Clone (or already cloned)
+# 클론 (또는 이미 클론된 상태)
 cd ~/Documents/workspace/critique-loop
 
-# Symlink into Claude Code's skills directory so the skill auto-registers
+# Claude Code의 skills 디렉토리에 심볼릭 링크 → 스킬 자동 등록
 mkdir -p ~/.claude/skills
 ln -s "$PWD" ~/.claude/skills/critique-loop
 
-# Verify the CLI runs
+# CLI 동작 확인
 python3 ./critique_loop.py --help
 ```
 
-Restart Claude Code (or start a new session) so it picks up the new skill.
+Claude Code를 재시작하거나 새 세션을 열면 스킬이 인식된다.
 
-## Usage
+## 사용법
 
-In any Claude Code session running inside tmux, with a Codex CLI in a sibling pane:
-
-```text
-/critique-loop                           # critique the prior Claude message/proposal
-/critique-loop src/foo.py                # critique a file
-/critique-loop --diff                    # critique current branch's diff vs base
-/critique-loop "use sqlite for the cache"   # critique free text
-```
-
-Common flags:
+tmux 세션 안에서 Claude Code를 실행 중이고, sibling pane에 Codex CLI가 있을 때:
 
 ```text
---rounds N            override max rounds (1..10, default 3)
---codex-pane %23      explicit pane id when there's more than one Codex pane
---no-health           ⚠ skip the round-0 health check (debug only; usually harmful)
---resume <run_id>     resume an interrupted run
---health              run only the round-0 PONG handshake
---list                list recent run_ids
---show <run_id>       re-print synthesis for a past run
+/critique-loop                           # 직전 Claude 메시지/제안 리뷰
+/critique-loop src/foo.py                # 파일 리뷰
+/critique-loop --diff                    # 현 브랜치의 diff vs base 리뷰
+/critique-loop "sqlite 캐시 쓰자"          # 자유 텍스트 리뷰
 ```
 
-### A typical session
+주요 플래그:
 
-1. Open tmux. Pane A: `claude`. Pane B: `codex`. Same window.
-2. In pane A: `/critique-loop src/worker/pool.py --rounds 3`
-3. Watch Codex's pane: it'll receive `@run-…/prompt-r1.md`, write `critique-r1.md`, idle.
-4. Claude wakes itself ~60s later, reads the critique, decides whether to continue.
-5. After up to 3 rounds (or earlier if Codex says `VERDICT: done`), Claude prints a synthesis to pane A.
+```text
+--rounds N            최대 라운드 수 오버라이드 (1..10, 기본 3)
+--codex-pane %23      Codex pane이 여러 개일 때 명시
+--no-health           ⚠ round-0 health check 생략 (디버그 전용; 보통 쓰지 않음)
+--resume <run_id>     중단된 run 재개
+--health              round-0 PONG 핸드셰이크만 단독 실행
+--list                최근 run_id 목록 출력
+--show <run_id>       과거 run의 합성 보고서 재출력
+```
 
-Artifacts live at `~/.claude/cache/critique-loop/<run_id>/`. Inspect them or re-print the synthesis with `/critique-loop --show <run_id>`.
+### 전형적인 세션
 
-## v0.1.0 scope note
+1. tmux 열기. Pane A: `claude`. Pane B: `codex`. 같은 윈도우.
+2. Pane A에서: `/critique-loop src/worker/pool.py --rounds 3`
+3. Codex pane 관찰: `@run-…/prompt-r1.md`를 받아 `critique-r1.md`를 쓰고 idle 상태로 돌아옴.
+4. Claude가 ~60초 후 깨어나 비평을 읽고 계속 진행할지 결정.
+5. 최대 3 라운드 후 (또는 Codex가 `VERDICT: done`을 내리면 일찍) Claude가 Pane A에 합성 보고서를 출력.
 
-This release is **a deliberate reduction of [SPEC.md](./SPEC.md)** — enough to dogfood the loop end-to-end without spending complexity budget on features that have no failing test cases yet.
+산출물은 `~/.claude/cache/critique-loop/<run_id>/`에 저장. `/critique-loop --show <run_id>`로 다시 출력 가능.
 
-What v0.1.0 keeps:
+## v0.1.0 범위 메모
 
-- File-as-source-of-truth + `tmux send-keys` wake channel
-- Round-0 health check (PONG handshake)
-- N-round loop with early termination on `VERDICT: done`
-- Pane discovery (auto-pick 1, error on 0/many)
-- Argv-based `tmux` calls + payload allowlist
+이 릴리즈는 **[SPEC.md](./SPEC.md)의 의도적 축소판** — 아직 실패 사례가 없는 기능에 복잡도를 쓰지 않고, 루프 전체를 end-to-end로 dogfood하는 것이 목표.
 
-What v0.1.0 omits (vs. SPEC.md):
+v0.1.0이 포함한 것:
 
-- `manifest.json` v2 schema → simplified `state.json`
-- Atomic `.tmp` + rename + `.done` sentinel protocol → plain writes
-- 6-field structured critique JSON → free-form markdown ending with `VERDICT: continue|done`
-- Per-finding accept/reject/defer state machine
-- `events.jsonl` event log
-- `request_id` nonce verification (drops late/duplicate signals)
-- Pane idle check before push
-- Schema-repair retries
+- 파일 source-of-truth + `tmux paste-buffer` wake 채널
+- Round-0 health check (PONG 핸드셰이크)
+- `VERDICT: done` 시 조기 종료가 있는 N-round 루프
+- Pane discovery (1개 자동 선택, 0개/복수 에러)
+- argv 기반 `tmux` 호출 + payload allowlist
 
-These will return as needed once dogfooding produces real failure modes. Until then, treat **`critique_loop.py` as authoritative** when behaviour disagrees with SPEC.md.
+v0.1.0이 뺀 것 (SPEC.md 대비):
 
-## Layout
+- `manifest.json` v2 스키마 → 단순화된 `state.json`
+- 원자적 `.tmp` + rename + `.done` sentinel 프로토콜 → 단순 파일 쓰기
+- 6-field 구조화 critique JSON → `VERDICT: continue|done`으로 끝나는 자유형 마크다운
+- Finding별 accept/reject/defer 상태 머신
+- `events.jsonl` 이벤트 로그
+- `request_id` nonce 검증 (지연/중복 신호 드롭)
+- Push 전 pane idle check
+- Schema-repair retry
+
+dogfooding에서 실제 실패 모드가 나오면 그때 단계적으로 도입. 그 전까지는 동작이 SPEC.md와 다르면 **`critique_loop.py`를 기준**으로 삼는다.
+
+## 파일 구조
 
 ```text
 critique-loop/
-├── SKILL.md            # what Claude reads to orchestrate the loop
-├── critique_loop.py    # the CLI Claude invokes
+├── SKILL.md            # Claude가 읽는 오케스트레이션 절차
+├── critique_loop.py    # Claude가 호출하는 CLI
 ├── test_critique_loop.py
 ├── pyproject.toml
-├── SPEC.md             # canonical design (target shape; v0.1.0 is a subset)
-├── SMOKE.md            # manual end-to-end checklist against a real Codex pane
-├── HANDOFF.md          # session-handoff notes (kept across resumes)
-└── README.md
+├── SPEC.md             # 설계 문서 (목표 형태; v0.1.0은 부분집합)
+├── SMOKE.md            # live Codex pane 대상 수동 체크리스트
+├── HANDOFF.md          # 세션 인계 메모
+├── README.md
+└── docs/eng/           # 영어 원본 문서
 ```
 
-## Development
+## 개발
 
 ```bash
-# Run tests
+# 테스트 실행
 python3 -m pytest -v
 
-# Manual smoke test against a real Codex pane
-# See SMOKE.md
+# Live Codex pane 대상 수동 smoke test
+# SMOKE.md 참고
 ```
 
-## License
+## 라이선스
 
-(none specified — personal-use skill)
+미지정 — 개인용 스킬
