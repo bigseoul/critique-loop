@@ -9,8 +9,10 @@
 - ✅ Task 1 — Scaffolding (commit `d1bd7e6`)
 - ✅ Task 2 — `critique_loop.py` TDD 구현 + 9 tests pass (commit `9b814a7`)
 - ✅ SPEC.md 이전 (commit `9a3db0a`)
-- ⏳ Task 3 — `SKILL.md` (Claude orchestration 절차)
-- ⏳ Task 4 — `README.md` + `SMOKE.md`
+- ✅ Task 3 — `SKILL.md` (commit `32d0114`)
+- ✅ Task 4 — `README.md` + `SMOKE.md` (commit `41b0127`)
+
+**v0.1.0 feature-complete.**
 
 `~/.claude/skills/critique-loop` 는 이 디렉토리로의 symlink (Claude Code가 그쪽 경로로 스킬 자동 인식).
 
