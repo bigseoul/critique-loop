@@ -71,7 +71,8 @@ CL="python3 \"$HOME/.claude/skills/critique-loop/critique_loop.py\""
 | `health-check --run-id RID` | `critique-r0.md` 읽기; `{ok, diagnosis}` 출력 |
 | `prompt --run-id RID --round N [--prior-summary S]` | `prompt-rN.md` 작성 |
 | `push --target PID --payload P` | bracketed-paste로 Codex 깨우기 (payload를 allowlist 정규식으로 검증) |
-| `check --run-id RID --round N` | `critique-rN.md` 검사; `{state: pending|done, verdict?: continue|done|unknown}` 출력 |
+| `check --run-id RID --round N` | `critique-rN.md` 검사; `{state: pending|done, verdict?: continue|done|unknown}` 출력. 빈 파일은 pending. |
+| `wait --run-id RID --round N [--interval 0.25] [--timeout 300]` | Codex가 `critique-rN.md`를 다 쓸 때까지 블로킹 polling. `{state: ready|timeout, elapsed_s, reason?}` 출력. ready 트리거: VERDICT 라인 / PONG / size-stable(2 polls) 중 하나. |
 | `synthesize --run-id RID` | 모든 비평을 단일 사람이 읽을 수 있는 보고서로 연결 |
 | `list` | run_id 목록 (최신순) |
 | `state --run-id RID` | 전체 `state.json` 출력 |
@@ -127,23 +128,22 @@ eval "$CL push --target '%N' --payload \"@$PROMPT_PATH [critique-loop run=<rid> 
 
 > **중요:** payload 안의 `@` 뒤 경로는 **반드시 절대경로**여야 한다. Codex가 자기 CWD를 기준으로 해석해서 home dir까지 `find`로 탐색하는 사고를 막기 위함. CLI는 항상 절대경로 `prompt_path`를 반환하므로 그 값을 그대로 박을 것.
 
-그 다음 **`ScheduleWakeup`으로 턴 종료**:
-
-- `delaySeconds: 30`
-- `prompt`: resume 모드로 이 스킬 재호출, 예: `/critique-loop --resume <rid>` + health 단계임을 표시하는 메모.
-- `reason`: "Codex health PONG 대기 중".
-
-깨어난 후:
+그 다음 **블로킹 wait** (60s 타임아웃):
 
 ```bash
+eval "$CL wait --run-id $RID --round 0 --timeout 60 --interval 0.25"
+# {"state": "ready"|"timeout", "elapsed_s": N, "reason"?: "..."} 반환
 eval "$CL health-check --run-id $RID"
 ```
 
-- `{"ok": true}` → Step 5 (Round 1)로 진행.
-- `{"ok": false, "diagnosis": "..."}` → 진단 내용과 함께 다음 중 하나로 사용자에게 보고 후 중단:
-  - "no critique-r0.md yet" → "Codex가 응답하지 않음. pane이 맞는지, Codex가 default (not Plan) mode인지 확인 후 `/critique-loop --resume <rid>` 재실행."
-  - "unexpected health response" → "Codex pane이 응답했지만 프로토콜을 따르지 않음. 해당 pane이 실제로 Codex CLI인지 확인."
-  - **1회 재시도** 허용: 실패 선언 전에 같은 프롬프트를 다시 push하고 ScheduleWakeup(30s) 한 번 더.
+`wait`이 `ready`를 반환하면 파일 쓰기가 끝난 상태 — 즉시 `health-check`로 진행. 이 호출은 `ScheduleWakeup` 없이 같은 턴에서 한다.
+
+- `wait` state=`ready` + `health-check` `{"ok": true}` → Step 5 (Round 1)로 진행.
+- `wait` state=`timeout` → Codex 무응답. **1회 재시도** 허용: 같은 프롬프트 재push 후 `wait --timeout 60` 한 번 더. 그래도 timeout이면 다음 진단으로 사용자에게 보고 후 중단:
+  - "Codex가 응답하지 않음. pane이 맞는지, Codex가 default (not Plan) mode인지 확인 후 `/critique-loop --resume <rid>` 재실행."
+- `wait` state=`ready` + `health-check` `{"ok": false}` → "Codex pane이 응답했지만 프로토콜을 따르지 않음. 해당 pane이 실제로 Codex CLI인지 확인." 후 중단.
+
+> **왜 ScheduleWakeup 안 쓰나:** 어차피 critique-loop 외에 할 일이 없고, ScheduleWakeup의 60s clamp 때문에 Codex가 5초 만에 끝나도 60초 헛도는 낭비가 컸음. file-poll이 곧 semantic completion signal이므로 블로킹 wait이 가장 단순하고 빠름.
 
 ### Step 5 — Round N 루프 (N = 1..max_rounds)
 
@@ -175,28 +175,26 @@ eval "$CL push --target '%N' --payload \"@$PROMPT_PATH [critique-loop run=<rid> 
 
 `push`는 `^@[A-Za-z0-9_./-]+ \[critique-loop [A-Za-z0-9_=. -]+\]$`에 매칭되지 않는 payload를 거부한다 (절대경로의 `/`는 허용된다). exit code 2가 나오면 payload 구성이 잘못된 것 — 수정할 것. **우회 금지**.
 
-**5d. ScheduleWakeup으로 턴 종료.**
-
-- `delaySeconds: 60`
-- `prompt`: 현재 라운드를 포함한 `/critique-loop --resume <rid>`.
-- `reason`: "Codex round N 비평 대기 중".
-
-**5e. 깨어난 후 — check.**
+**5d. 블로킹 wait + check.**
 
 ```bash
+eval "$CL wait --run-id $RID --round $N --timeout 300 --interval 0.25"
+# state=ready면 파일 다 써진 상태. state=timeout이면 watchdog timeout.
 eval "$CL check --run-id $RID --round $N"
 ```
 
-JSON에 따라 분기:
+같은 턴에서 연속 호출. `ScheduleWakeup` 안 쓴다 (Step 4 끝의 박스 참조).
 
-| `state` | `verdict` | 액션 |
+`wait` state에 따른 분기:
+
+| `wait.state` | `check.state` / `verdict` | 액션 |
 |---|---|---|
-| `pending` | — | Codex가 아직 쓰지 않음. 이 라운드의 총 경과 시간 < 300s이면 ScheduleWakeup(60s) 재예약. ≥ 300s이면 **watchdog timeout**: 사용자에게 `--resume <rid>` 복구 방법과 함께 보고 후 중단. |
-| `done` | `done` | 조기 종료. 남은 라운드 건너뛰고 Step 6 (합성)으로. |
-| `done` | `continue` | `N < max_rounds`이면 round `N+1`로 (5a로 돌아감). `N == max_rounds`이면 Step 6으로, "max rounds 도달, finding 미해결" 명시. |
-| `done` | `unknown` | Codex가 비평을 썼지만 마지막 줄이 유효한 `VERDICT:` 지시어가 아님. 보수적으로 `continue`로 처리; 최종 합성에서 파싱 불가 verdict를 사용자에게 표시. |
+| `ready` | `done` / `done` | 조기 종료. 남은 라운드 건너뛰고 Step 6 (합성)으로. |
+| `ready` | `done` / `continue` | `N < max_rounds`이면 round `N+1`로 (5a로 돌아감). `N == max_rounds`이면 Step 6으로, "max rounds 도달, finding 미해결" 명시. |
+| `ready` | `done` / `unknown` | Codex가 비평을 썼지만 마지막 줄이 유효한 `VERDICT:` 지시어가 아님. 보수적으로 `continue`로 처리; 최종 합성에서 파싱 불가 verdict를 사용자에게 표시. |
+| `timeout` | — | **Watchdog timeout**: 사용자에게 `wait.elapsed_s`와 `--resume <rid>` 복구 방법 보고 후 중단. 무한 루프 금지. |
 
-라운드당 경과 시간은 첫 wake 예약 시점을 기억해서 추적; wake `prompt`에 (라운드 번호 + 첫 wake 타임스탬프)를 포함시켜 watchdog 판단 가능하게 할 것.
+`wait`의 `reason` 필드도 사용자에게 노출 가치 있음 (`verdict-or-pong` = 정상, `size-stable` = VERDICT 라인 없이 끝남 → 합성에서 표시).
 
 ### Step 6 — 합성
 
@@ -244,8 +242,8 @@ eval "$CL synthesize --run-id <run_id>"
 
 1. `eval "$CL state --run-id <run_id>"` → 현재 `round`, `max_rounds`, `codex_pane`, `input_source` 읽기.
 2. run 디렉토리(`~/.claude/cache/critique-loop/<run_id>/`)에서 가장 높은 `prompt-rK.md`와 `critique-rK.md` 탐색.
-3. 최신 프롬프트에 대한 `critique-rK.md`가 존재하면 → `check` 호출 후 round K에 대해 Step 5e 계속.
-4. `prompt-rK.md`만 있으면 → 다시 push하고 ScheduleWakeup(60s).
+3. 최신 프롬프트에 대한 `critique-rK.md`가 존재하고 size>0이면 → `check` 호출 후 round K에 대해 Step 5d 분기 계속.
+4. `prompt-rK.md`만 있으면 → 다시 push하고 `wait --round K --timeout 300`.
 5. 둘 다 없으면 (또는 round 0만) → 진행 중이던 라운드를 Step 5b부터 재시작.
 
 Resume은 새 run_id를 만들지 않으며 `init`을 재실행하지 않는다.
@@ -256,9 +254,9 @@ Resume은 새 run_id를 만들지 않으며 `init`을 재실행하지 않는다.
 |---|---|---|
 | `pane-discover`가 codex pane 0개 | 이 윈도우에 Codex 미실행 | 사용자에게 안내; 중단. |
 | `pane-discover`가 2개 이상 | Codex 세션 복수 | `AskUserQuestion`으로 선택; `--codex-pane`으로 기록. |
-| Health round-0 PONG 30s + 30s 재시도 후 없음 | Plan mode, 잘못된 pane, 또는 TUI 멈춤 | `health-check.diagnosis`에 따라 진단; `--resume` 복구 힌트와 함께 중단. |
+| Health `wait --round 0 --timeout 60` + 1회 재시도 후 timeout | Plan mode, 잘못된 pane, 또는 TUI 멈춤 | `health-check.diagnosis`에 따라 진단; `--resume` 복구 힌트와 함께 중단. |
 | `push` exit code 2 ("unsafe/invalid payload") | payload 구성 오류 | 정확한 형식 `@<absolute-prompt-path> [critique-loop run=<rid> round=N]`으로 재구성 (CLI가 반환한 절대 `prompt_path`를 그대로 사용). 검증 우회 금지. |
-| `check`가 300s 이상 계속 `pending` 반환 | Codex 응답 없음 또는 wake 무시 | Watchdog timeout: `--resume <rid>` 힌트와 함께 보고 후 중단. 무한 루프 금지. |
+| `wait`가 `state=timeout` 반환 (round 라운드, 기본 300s) | Codex 응답 없음 또는 멈춤 | Watchdog timeout: `wait.elapsed_s`와 `--resume <rid>` 힌트 보고 후 중단. 무한 루프 금지. |
 | `check`가 `verdict=unknown` 반환 | Codex가 `VERDICT: continue|done` 없이 종료 | v0.1에는 schema repair 없음. `continue`로 처리 (라운드 1회 추가)하고 합성에서 표시. |
 | 사용자 Ctrl-C | — | `/critique-loop --resume <rid>`로 state.json에서 중단된 지점 재개 가능. |
 

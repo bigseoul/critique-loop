@@ -194,6 +194,59 @@ def test_check_no_verdict_returns_done_unknown(monkeypatch, cache_root: Path):
     assert payload["verdict"] == "unknown"
 
 
+def test_check_treats_empty_file_as_pending(monkeypatch, cache_root: Path):
+    """Half-written file (size==0) must not be reported as done — would
+    misclassify a freshly-touched output as a verdict=unknown response.
+    """
+    rid = _init_run(monkeypatch, cache_root)
+    (cache_root / rid / "critique-r1.md").write_text("")
+    rc, out, _ = _run(monkeypatch, cache_root,
+                      "check", "--run-id", rid, "--round", "1")
+    assert json.loads(out)["state"] == "pending"
+
+
+def test_wait_returns_ready_on_verdict_line(monkeypatch, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root)
+    (cache_root / rid / "critique-r1.md").write_text("Findings.\n\nVERDICT: done\n")
+    rc, out, _ = _run(monkeypatch, cache_root,
+                      "wait", "--run-id", rid, "--round", "1",
+                      "--interval", "0.01", "--timeout", "1")
+    payload = json.loads(out)
+    assert payload["state"] == "ready"
+    assert payload["reason"] == "verdict-or-pong"
+
+
+def test_wait_returns_ready_on_pong_for_round_0(monkeypatch, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root)
+    (cache_root / rid / "critique-r0.md").write_text("PONG\n")
+    rc, out, _ = _run(monkeypatch, cache_root,
+                      "wait", "--run-id", rid, "--round", "0",
+                      "--interval", "0.01", "--timeout", "1")
+    assert json.loads(out)["state"] == "ready"
+
+
+def test_wait_timeout_when_file_never_appears(monkeypatch, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root)
+    rc, out, _ = _run(monkeypatch, cache_root,
+                      "wait", "--run-id", rid, "--round", "1",
+                      "--interval", "0.01", "--timeout", "0.05")
+    assert json.loads(out)["state"] == "timeout"
+
+
+def test_wait_size_stable_fallback_for_missing_verdict(monkeypatch, cache_root: Path):
+    """If Codex writes a non-empty body without VERDICT line and stops,
+    `wait` must still return after size stays stable across two polls.
+    """
+    rid = _init_run(monkeypatch, cache_root)
+    (cache_root / rid / "critique-r1.md").write_text("body without verdict")
+    rc, out, _ = _run(monkeypatch, cache_root,
+                      "wait", "--run-id", rid, "--round", "1",
+                      "--interval", "0.01", "--timeout", "1")
+    payload = json.loads(out)
+    assert payload["state"] == "ready"
+    assert payload["reason"] == "size-stable"
+
+
 def test_synthesize_concatenates_all_critiques(monkeypatch, cache_root: Path):
     rid = _init_run(monkeypatch, cache_root)
     (cache_root / rid / "critique-r1.md").write_text("R1: bad.\n\nVERDICT: continue\n")

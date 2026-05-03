@@ -185,18 +185,79 @@ def cmd_pane_discover(a) -> int:
     return 0
 
 
+_VERDICT_RE = re.compile(r"^VERDICT:\s*(continue|done)\s*$")
+
+
+def _ready_signal(text: str, round_n: int) -> bool:
+    """Return True if `text` looks like a complete Codex response.
+
+    Strong signals: VERDICT line for review rounds, PONG for round-0 health.
+    Caller falls back to size-stability if neither matches.
+    """
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    last = stripped.splitlines()[-1].strip()
+    if _VERDICT_RE.match(last):
+        return True
+    if round_n == 0 and "PONG" in stripped.upper():
+        return True
+    return False
+
+
 def cmd_check(a) -> int:
     rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
     crit = rd / f"critique-r{a.round}.md"
-    if not crit.exists():
+    if not crit.exists() or crit.stat().st_size == 0:
         print(json.dumps({"state": "pending"}))
         return 0
     text = crit.read_text().rstrip()
     last = text.splitlines()[-1].strip() if text else ""
-    m = re.match(r"^VERDICT:\s*(continue|done)\s*$", last)
+    m = _VERDICT_RE.match(last)
     verdict = m.group(1) if m else "unknown"
     print(json.dumps({"state": "done", "verdict": verdict}))
     return 0
+
+
+def cmd_wait(a) -> int:
+    """Block until Codex finishes writing critique-r{round}.md, or timeout.
+
+    Polls every `interval` seconds. Returns `ready` when the file is non-empty
+    AND one of:
+      - last non-empty line matches VERDICT: continue|done (review rounds)
+      - body contains PONG (round-0 health)
+      - file size has been stable for >= 2 consecutive polls (fallback for
+        responses that don't produce a recognized terminator)
+    """
+    rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
+    crit = rd / f"critique-r{a.round}.md"
+    start = time.monotonic()
+    deadline = start + a.timeout
+    last_size = -1
+    stable_polls = 0
+    while True:
+        if crit.exists():
+            size = crit.stat().st_size
+            if size > 0:
+                text = crit.read_text()
+                if _ready_signal(text, a.round):
+                    elapsed = round(time.monotonic() - start, 2)
+                    print(json.dumps({"state": "ready", "elapsed_s": elapsed, "reason": "verdict-or-pong"}))
+                    return 0
+                if size == last_size:
+                    stable_polls += 1
+                    if stable_polls >= 2:
+                        elapsed = round(time.monotonic() - start, 2)
+                        print(json.dumps({"state": "ready", "elapsed_s": elapsed, "reason": "size-stable"}))
+                        return 0
+                else:
+                    stable_polls = 0
+                last_size = size
+        if time.monotonic() >= deadline:
+            elapsed = round(time.monotonic() - start, 2)
+            print(json.dumps({"state": "timeout", "elapsed_s": elapsed}))
+            return 0
+        time.sleep(a.interval)
 
 
 def cmd_synthesize(a) -> int:
@@ -272,6 +333,12 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run-id", required=True)
     s.add_argument("--round", type=int, required=True)
 
+    s = sub.add_parser("wait")
+    s.add_argument("--run-id", required=True)
+    s.add_argument("--round", type=int, required=True)
+    s.add_argument("--interval", type=float, default=0.25)
+    s.add_argument("--timeout", type=float, default=300.0)
+
     s = sub.add_parser("synthesize")
     s.add_argument("--run-id", required=True)
 
@@ -291,6 +358,7 @@ _DISPATCH = {
     "push": cmd_push,
     "pane-discover": cmd_pane_discover,
     "check": cmd_check,
+    "wait": cmd_wait,
     "synthesize": cmd_synthesize,
     "list": cmd_list,
     "state": cmd_state,
