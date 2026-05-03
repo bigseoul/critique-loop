@@ -77,6 +77,97 @@ CL="python3 \"$HOME/.claude/skills/critique-loop/critique_loop.py\""
 | `list` | run_id 목록 (최신순) |
 | `state --run-id RID` | 전체 `state.json` 출력 |
 
+## Claude ↔ Codex 메시지 모델
+
+**핵심:** 두 pane은 **공유 디렉토리의 파일**로 대화한다. tmux는 메시지 채널이 아니라 "파일 썼으니 읽어봐" 한 번 깨우는 알람일 뿐이다.
+
+```text
+        ┌── 명령 채널 (Claude → Codex, 1회성) ─────┐
+        │  tmux paste-buffer + Enter             │
+        │  payload: @<절대경로> [critique-loop ...] │
+        │  → Codex의 Ink/React TUI에 1개 입력으로  │
+        │    들어가서 사용자가 친 것처럼 처리됨        │
+        └────────────────────────────────────────┘
+                          │
+                          ▼
+              ~/.claude/cache/critique-loop/<run_id>/
+              ├── prompt-rN.md    ◄── Claude write, Codex read
+              └── critique-rN.md  ──► Codex write, Claude read (poll)
+                          ▲
+                          │
+        ┌── 응답 채널 (Codex → Claude, file) ──────┐
+        │  Codex가 critique-rN.md를 작성             │
+        │  Claude의 `wait`이 0.5s 간격 stat polling  │
+        │  → VERDICT 라인 / PONG / size-stable로     │
+        │    완료 감지 → ready 반환                   │
+        └────────────────────────────────────────┘
+```
+
+### 두 채널의 명확한 분리
+
+| 채널 | 매체 | 페이로드 | 누가 작성 |
+|---|---|---|---|
+| **명령 (wake)** | tmux paste-buffer | `@<절대경로> [critique-loop run=<rid> round=N]` 한 줄 | Claude (`cmd_push`) |
+| **프롬프트 (read)** | 디스크 파일 `prompt-rN.md` | 자기 프로토콜 + 리뷰 대상 본문 | Claude (`cmd_prompt` / `cmd_health_prompt`) |
+| **응답** | 디스크 파일 `critique-rN.md` | 마크다운 비평, 마지막 줄 `VERDICT: continue|done` (또는 health round은 `PONG`) | Codex |
+| **완료 감지** | 파일 stat poll | — | Claude (`cmd_wait`) |
+
+### 왜 파일이 source of truth
+
+- Codex가 tmux 명령(`tmux wait-for -S ...`)을 실행할 수도 있지만, 권한/샌드박스 상태에 의존. 파일은 항상 동작.
+- Codex의 역할을 "프롬프트 읽고 비평 파일 쓰기" 한 가지로 좁힌다 → 프로토콜 단순.
+- 비동기 ScheduleWakeup 핸드오프가 60s clamp 때문에 낭비 컸음. file-poll = semantic completion signal이라 실시간.
+
+### 메시지 형식 정확히
+
+**Push payload (Claude → Codex, tmux 한 줄):**
+```
+@/Users/.../cache/critique-loop/run-2026.../prompt-rN.md [critique-loop run=run-2026... round=N]
+```
+- `@<절대경로>` — Codex가 read 트리거
+- 정규식 `^@[A-Za-z0-9_./-]+ \[critique-loop [A-Za-z0-9_=. -]+\]$` 통과해야 push (CLI 강제)
+- **반드시 절대경로** — 상대경로면 Codex가 자기 CWD 기준으로 못 찾고 home dir 전체 `find` 발동 → 권한 다이얼로그 폭주
+
+**Prompt 파일 본문 (review round):**
+```markdown
+# critique-loop protocol
+You are an adversarial code reviewer. Round N of M.
+
+Write your critique to this exact absolute path (do NOT search for it):
+/Users/.../critique-rN.md
+
+... (포맷 규칙: 마지막 줄은 VERDICT: continue|done)
+... (이전 라운드 요약, 리뷰 대상 본문)
+```
+
+**Critique 파일 (Codex → Claude):**
+```markdown
+## Findings
+
+### High: ...
+- Severity: ...
+- Where: ...
+- ...
+
+VERDICT: continue
+```
+
+**Health round은 본문이 그냥 `PONG` 한 줄.**
+
+### 메시지 모델에서 따라오는 제약
+
+| 제약 | 이유 |
+|---|---|
+| 모든 파일 경로는 **절대경로** | Codex가 home dir `find` 시작하는 사고 차단 |
+| Push payload는 **bracketed-paste**로만 (paste-buffer) | `tmux send-keys -l`은 Ink/React TUI가 입력으로 인식 안 함 |
+| Codex pane은 **default mode** (Plan mode 금지) | Plan mode면 파일 쓰기 거부 → wait 영원히 timeout |
+| Codex pane은 **같은 tmux 윈도우의 sibling**만 | `pane-discover`가 같은 윈도우만 스캔 |
+| 모든 산출물 `~/.claude/cache/critique-loop/<run_id>/` 안에만 | 외부 쓰기 = 프로토콜 위반 |
+| Bash 툴 timeout ≥ `(wait timeout + 20) × 1000` ms | 외곽 Bash가 wait보다 먼저 죽으면 state 어중간 |
+| Push payload는 CLI가 정규식으로 거부 | 임의 경로/명령 인젝션 차단 |
+
+상세 안전 규칙은 §안전 제약, 메시지가 안 통할 때의 진단은 §에러 처리 참조.
+
 ## 절차
 
 ### Step 1 — 입력 resolve
