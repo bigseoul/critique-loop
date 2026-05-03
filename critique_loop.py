@@ -25,7 +25,9 @@ PROTOCOL_HEADER = """\
 # critique-loop protocol
 You are an adversarial code reviewer. This is round {round_n} of {max_rounds}.
 
-Write your critique to: {critique_path}
+Write your critique to this exact absolute path (do NOT search for it; create the file):
+{critique_path}
+
 Format: free-form markdown, with the LAST LINE being exactly one of:
 - `VERDICT: continue` (more rounds may help)
 - `VERDICT: done` (no critical or high-severity issues remain)
@@ -39,7 +41,9 @@ HEALTH_PROMPT = """\
 # critique-loop protocol — health check
 [critique-loop ping]
 
-Reply by writing the file: {critique_path}
+Reply by writing this exact absolute path (do NOT search for it; create the file):
+{critique_path}
+
 Contents (verbatim, single line):
 PONG
 """
@@ -91,9 +95,11 @@ def cmd_init(a) -> int:
 
 def cmd_health_prompt(a) -> int:
     rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
-    body = HEALTH_PROMPT.format(critique_path="critique-r0.md")
-    (rd / "prompt-r0.md").write_text(body)
-    print(json.dumps({"prompt_path": f"{a.run_id}/prompt-r0.md"}))
+    prompt_path = rd / "prompt-r0.md"
+    critique_path = rd / "critique-r0.md"
+    body = HEALTH_PROMPT.format(critique_path=str(critique_path))
+    prompt_path.write_text(body)
+    print(json.dumps({"prompt_path": str(prompt_path)}))
     return 0
 
 
@@ -114,9 +120,10 @@ def cmd_health_check(a) -> int:
 def cmd_prompt(a) -> int:
     rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
     state = _load_state(rd)
-    critique_path = f"critique-r{a.round}.md"
+    prompt_path = rd / f"prompt-r{a.round}.md"
+    critique_path = rd / f"critique-r{a.round}.md"
     body = PROTOCOL_HEADER.format(
-        round_n=a.round, max_rounds=state["max_rounds"], critique_path=critique_path,
+        round_n=a.round, max_rounds=state["max_rounds"], critique_path=str(critique_path),
     )
     if a.prior_summary.strip():
         body += "\n## Prior rounds\n\n" + a.prior_summary + "\n"
@@ -125,10 +132,10 @@ def cmd_prompt(a) -> int:
         f"- source: {state['input_source']}\n\n"
         f"```\n{state['input_body']}\n```\n"
     )
-    (rd / f"prompt-r{a.round}.md").write_text(body)
+    prompt_path.write_text(body)
     state["round"] = a.round
     _save_state(rd, state)
-    print(json.dumps({"prompt_path": f"{a.run_id}/prompt-r{a.round}.md"}))
+    print(json.dumps({"prompt_path": str(prompt_path)}))
     return 0
 
 

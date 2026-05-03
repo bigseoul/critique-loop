@@ -76,11 +76,14 @@ def test_prompt_writes_file_with_protocol_header(monkeypatch, cache_root: Path):
     )
     assert rc == 0
     payload = json.loads(out)
-    assert payload["prompt_path"] == f"{rid}/prompt-r1.md"
+    expected_prompt = str(cache_root / rid / "prompt-r1.md")
+    expected_critique = str(cache_root / rid / "critique-r1.md")
+    assert payload["prompt_path"] == expected_prompt
     body = (cache_root / rid / "prompt-r1.md").read_text()
     assert "critique-loop protocol" in body
     assert "round 1 of 3" in body
-    assert "critique-r1.md" in body
+    # Critique target must be an absolute path so Codex doesn't `find` for it.
+    assert expected_critique in body
     assert "VERDICT:" in body
     assert "content X" in body
 
