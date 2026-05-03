@@ -1,3 +1,9 @@
+<!--
+⚠ STALE — last synced before the 2026-05-03 rewrite.
+The Korean SMOKE.md (../../SMOKE.md) is the authoritative source.
+ScheduleWakeup hand-offs were replaced with `wait` (blocking file-poll).
+-->
+
 # critique-loop — Smoke Test Checklist
 
 Manual end-to-end checks against a **live Codex CLI pane**. Unit tests in `test_critique_loop.py` cover the CLI in isolation; this file covers the parts only a real tmux + Codex session can exercise: pane discovery, the wake channel, the ScheduleWakeup hand-off, and Codex's actual response to the protocol prompt.

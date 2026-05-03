@@ -1,3 +1,10 @@
+<!--
+⚠ STALE — last synced before the 2026-05-03 rewrite.
+The Korean SKILL.md (../../SKILL.md) is the authoritative source.
+Notable diff: ScheduleWakeup hand-offs were replaced with the `wait`
+subcommand (blocking file-poll). allowed-tools no longer includes
+ScheduleWakeup. Bash tool timeout must be >= (wait timeout + 20s) * 1000 ms.
+-->
 ---
 name: critique-loop
 version: 0.1.0

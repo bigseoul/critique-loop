@@ -72,7 +72,7 @@ CL="python3 \"$HOME/.claude/skills/critique-loop/critique_loop.py\""
 | `prompt --run-id RID --round N [--prior-summary S]` | `prompt-rN.md` 작성 |
 | `push --target PID --payload P` | bracketed-paste로 Codex 깨우기 (payload를 allowlist 정규식으로 검증) |
 | `check --run-id RID --round N` | `critique-rN.md` 검사; `{state: pending|done, verdict?: continue|done|unknown}` 출력. 빈 파일은 pending. |
-| `wait --run-id RID --round N [--interval 0.25] [--timeout 300]` | Codex가 `critique-rN.md`를 다 쓸 때까지 블로킹 polling. `{state: ready|timeout, elapsed_s, reason?}` 출력. ready 트리거: VERDICT 라인 / PONG / size-stable(2 polls) 중 하나. |
+| `wait --run-id RID --round N [--interval 0.5] [--timeout 300]` | Codex가 `critique-rN.md`를 다 쓸 때까지 블로킹 polling. `{state: ready|timeout, elapsed_s, reason?}` 출력. ready 트리거 우선순위: 1순위 VERDICT 라인 또는 PONG, 2순위 size-stable(연속 4 polls 동안 size 변동 없음 = 기본 ~2초). |
 | `synthesize --run-id RID` | 모든 비평을 단일 사람이 읽을 수 있는 보고서로 연결 |
 | `list` | run_id 목록 (최신순) |
 | `state --run-id RID` | 전체 `state.json` 출력 |
@@ -144,6 +144,8 @@ eval "$CL health-check --run-id $RID"
 - `wait` state=`ready` + `health-check` `{"ok": false}` → "Codex pane이 응답했지만 프로토콜을 따르지 않음. 해당 pane이 실제로 Codex CLI인지 확인." 후 중단.
 
 > **왜 ScheduleWakeup 안 쓰나:** 어차피 critique-loop 외에 할 일이 없고, ScheduleWakeup의 60s clamp 때문에 Codex가 5초 만에 끝나도 60초 헛도는 낭비가 컸음. file-poll이 곧 semantic completion signal이므로 블로킹 wait이 가장 단순하고 빠름.
+
+> **⚠ Bash tool timeout 필수 설정.** `wait --timeout N`을 호출할 때 Bash 툴 인보케이션의 timeout을 최소 `(N + 20) * 1000` ms로 설정해야 한다. 안 그러면 외곽 Bash 툴이 wait보다 먼저 죽어서 state가 어중간하게 남는다. 예: `wait --timeout 300` → Bash `timeout: 320000`. 기본 health round은 `--timeout 60` → Bash `timeout: 80000`.
 
 ### Step 5 — Round N 루프 (N = 1..max_rounds)
 

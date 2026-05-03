@@ -1,6 +1,6 @@
 # critique-loop — Smoke Test 체크리스트
 
-**live Codex CLI pane** 대상 수동 end-to-end 검증. `test_critique_loop.py`의 단위 테스트는 CLI를 격리 환경에서 커버하고, 이 파일은 실제 tmux + Codex 세션에서만 확인 가능한 것들을 다룬다: pane discovery, wake 채널, ScheduleWakeup 핸드오프, 그리고 Codex의 실제 프로토콜 응답.
+**live Codex CLI pane** 대상 수동 end-to-end 검증. `test_critique_loop.py`의 단위 테스트는 CLI를 격리 환경에서 커버하고, 이 파일은 실제 tmux + Codex 세션에서만 확인 가능한 것들을 다룬다: pane discovery, push 채널 (bracketed-paste), file-poll `wait`의 실제 latency, 그리고 Codex의 실제 프로토콜 응답.
 
 `critique_loop.py`, `SKILL.md`, 또는 wake/protocol 계약에 닿는 변경을 할 때마다 실행.
 
@@ -63,7 +63,7 @@ Pane A에서 Claude에게:
 
 Pane B 관찰: Codex가 `@<rid>/prompt-r0.md [critique-loop run=<rid> round=0]`을 받아 프롬프트를 열고 `~/.claude/cache/critique-loop/<rid>/critique-r0.md`에 `PONG`을 써야 한다.
 
-Claude가 ScheduleWakeup ~30s 후 "health OK" 메시지로 돌아온다.
+Claude가 `wait --round 0 --timeout 60`으로 블로킹하다가 보통 5~30s 안에 "health OK" 메시지로 돌아온다 (이전엔 ScheduleWakeup ~30s 고정).
 
 **기대 결과**:
 - Pane B에서 `@`-참조를 받고 실제로 처리하는 게 보임.
@@ -122,12 +122,12 @@ Pane A에서:
 - Round 1: Codex가 복수의 finding (SQL injection, command injection, 파일 경로 문제) 지적. `VERDICT: continue`.
 - Round 2: Claude의 `--prior-summary`가 비어있지 않음; Codex가 남은 이슈 지적 (`continue`) 또는 완료 (`done`).
 - Round 3: 최대. Round 3 후에도 `continue`이면 합성에 "max rounds 도달, finding 미해결" 표시.
-- 총 소요 시간: `30s health + 60s/round × N` + Codex 응답 시간.
+- 총 소요 시간 ≈ Codex 응답 시간 합 (file-poll로 즉시 진행. 이전 `ScheduleWakeup(30s health + 60s/round)` 고정 비용 사라짐).
 
 **확인 포인트**:
 - Round 2부터 프롬프트 파일에 `## Prior rounds` 섹션 포함.
-- ScheduleWakeup 핸드오프 가시: Claude가 라운드 사이에 "턴 종료"하고 ~60초 후 재개.
-- 합성이 모든 `critique-rN.md`를 순서대로 연결.
+- 라운드 사이에 ScheduleWakeup 턴 종료 없이 같은 Bash 콜에서 연속 진행 (`push → wait → check`).
+- 합성이 모든 `critique-rN.md`를 순서대로 연결. VERDICT 라인 없는 라운드는 ⚠ 경고 표시.
 
 ---
 

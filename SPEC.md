@@ -1,8 +1,10 @@
 # critique-loop Skill — Design Spec (v2)
 
-- **Status**: Approved for implementation planning
+- **Status**: Approved for implementation planning (v0.1.0 베이스라인)
 - **Date**: 2026-05-01
 - **Author**: Claude (브레인스토밍 + Codex 2라운드 비평 반영)
+
+> **🛈 2026-05-03 후기 업데이트:** 본 spec의 `ScheduleWakeup(30s/60s)` 핸드오프 모델은 v0.1.x 후속 작업에서 `wait` 서브커맨드(블로킹 file-poll)로 대체됐다. v0.2 plan(§17 "v1: 파일 source-of-truth + ScheduleWakeup 폴링")의 후반부가 file-poll로 자연스럽게 합쳐진 셈. 현재 동작은 `SKILL.md`와 `critique_loop.py`를 기준으로 하고, 본 문서의 ScheduleWakeup 언급은 설계 history로 둔다.
 - **Spec file**: `docs/superpowers/specs/2026-05-01-critique-loop-design.md`
 
 ---

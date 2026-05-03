@@ -1,3 +1,10 @@
+<!--
+⚠ STALE — last synced before the 2026-05-03 rewrite.
+The Korean README (../../README.md) is the authoritative source.
+Round-to-round hand-offs no longer use ScheduleWakeup; orchestration is
+synchronous via `wait` (blocking file-poll).
+-->
+
 # critique-loop
 
 Adversarial review loop between a Claude Code pane and a Codex CLI pane in the same tmux window.

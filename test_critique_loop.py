@@ -235,16 +235,43 @@ def test_wait_timeout_when_file_never_appears(monkeypatch, cache_root: Path):
 
 def test_wait_size_stable_fallback_for_missing_verdict(monkeypatch, cache_root: Path):
     """If Codex writes a non-empty body without VERDICT line and stops,
-    `wait` must still return after size stays stable across two polls.
+    `wait` must still return after size stays stable across the threshold
+    (currently 4) consecutive polls — but only after that, not on the first
+    stable poll. This is the conservative fallback for non-protocol responses.
     """
     rid = _init_run(monkeypatch, cache_root)
     (cache_root / rid / "critique-r1.md").write_text("body without verdict")
     rc, out, _ = _run(monkeypatch, cache_root,
                       "wait", "--run-id", rid, "--round", "1",
-                      "--interval", "0.01", "--timeout", "1")
+                      "--interval", "0.01", "--timeout", "5")
     payload = json.loads(out)
     assert payload["state"] == "ready"
     assert payload["reason"] == "size-stable"
+
+
+def test_wait_does_not_short_circuit_on_first_stable_poll(monkeypatch, cache_root: Path):
+    """Regression: with a tiny timeout that allows < threshold stable polls,
+    wait must time out instead of returning ready. Earlier code returned ready
+    after just 2 stable polls, which catches mid-stream pauses as completion.
+    """
+    rid = _init_run(monkeypatch, cache_root)
+    (cache_root / rid / "critique-r1.md").write_text("body without verdict")
+    # interval=0.05, timeout=0.06 → only ~1 poll possible, well below threshold (4).
+    rc, out, _ = _run(monkeypatch, cache_root,
+                      "wait", "--run-id", rid, "--round", "1",
+                      "--interval", "0.05", "--timeout", "0.06")
+    assert json.loads(out)["state"] == "timeout"
+
+
+def test_synthesize_flags_rounds_without_verdict(monkeypatch, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root)
+    (cache_root / rid / "critique-r1.md").write_text("body, no verdict\n")
+    (cache_root / rid / "critique-r2.md").write_text("clean.\n\nVERDICT: done\n")
+    rc, out, _ = _run(monkeypatch, cache_root, "synthesize", "--run-id", rid)
+    assert "VERDICT 라인 없음" in out  # warning on round 1
+    # Round 2 has VERDICT — should not be flagged. Verify by checking that
+    # the warning appears exactly once.
+    assert out.count("VERDICT 라인 없음") == 1
 
 
 def test_synthesize_concatenates_all_critiques(monkeypatch, cache_root: Path):

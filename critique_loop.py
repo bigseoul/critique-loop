@@ -219,6 +219,13 @@ def cmd_check(a) -> int:
     return 0
 
 
+# size-stable fallback requires this many consecutive polls with unchanged
+# size before declaring ready. With default interval=0.5s, that's ~2s of
+# silence — long enough to ride out token-stream pauses but short enough to
+# not waste user time when Codex emits non-VERDICT terminators.
+_STABLE_POLLS_THRESHOLD = 4
+
+
 def cmd_wait(a) -> int:
     """Block until Codex finishes writing critique-r{round}.md, or timeout.
 
@@ -226,8 +233,13 @@ def cmd_wait(a) -> int:
     AND one of:
       - last non-empty line matches VERDICT: continue|done (review rounds)
       - body contains PONG (round-0 health)
-      - file size has been stable for >= 2 consecutive polls (fallback for
-        responses that don't produce a recognized terminator)
+      - file size has been stable for >= _STABLE_POLLS_THRESHOLD consecutive
+        polls (conservative fallback for responses without a recognized
+        terminator)
+
+    NOTE: Bash tool timeout must be at least (timeout + 20s) * 1000 ms when
+    invoking this from Claude Code, or the outer harness will kill the wait
+    before it reports back.
     """
     rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
     crit = rd / f"critique-r{a.round}.md"
@@ -246,7 +258,7 @@ def cmd_wait(a) -> int:
                     return 0
                 if size == last_size:
                     stable_polls += 1
-                    if stable_polls >= 2:
+                    if stable_polls >= _STABLE_POLLS_THRESHOLD:
                         elapsed = round(time.monotonic() - start, 2)
                         print(json.dumps({"state": "ready", "elapsed_s": elapsed, "reason": "size-stable"}))
                         return 0
@@ -272,8 +284,14 @@ def cmd_synthesize(a) -> int:
         f = rd / f"critique-r{n}.md"
         if not f.exists():
             continue
+        text = f.read_text().rstrip()
+        last = text.splitlines()[-1].strip() if text else ""
+        has_verdict = bool(_VERDICT_RE.match(last))
         out.append(f"### Round {n}")
-        out.append(f.read_text().rstrip())
+        if not has_verdict:
+            out.append("> ⚠ VERDICT 라인 없음 — `wait`가 size-stable fallback으로 종료를 감지했을 수 있음. 응답이 잘렸거나 프로토콜 미준수일 가능성 검토.")
+            out.append("")
+        out.append(text)
         out.append("")
     out.append(f"### 산출물")
     out.append(f"- {rd}")
@@ -336,7 +354,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("wait")
     s.add_argument("--run-id", required=True)
     s.add_argument("--round", type=int, required=True)
-    s.add_argument("--interval", type=float, default=0.25)
+    s.add_argument("--interval", type=float, default=0.5)
     s.add_argument("--timeout", type=float, default=300.0)
 
     s = sub.add_parser("synthesize")

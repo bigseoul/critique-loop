@@ -2,6 +2,8 @@
 
 > 이 파일은 corp_graph 프로젝트에서 시작된 작업을 이 프로젝트에서 이어가기 위한 메모입니다.
 > 새 Claude Code 세션을 이 프로젝트(`/Users/daegyunggang/Documents/workspace/critique-loop`)에서 띄운 뒤, 이 파일을 읽도록 안내하세요.
+>
+> **🛈 2026-05-03 업데이트:** Round 사이의 `ScheduleWakeup(30s/60s)` 핸드오프는 `wait` 서브커맨드(블로킹 file-poll)로 대체됐다. 아래 Task 3 / Task 4의 ScheduleWakeup 언급은 v0.1.0 초기 설계의 흔적이며, 현재 구현은 `SKILL.md`를 참조한다. allowed-tools에서도 `ScheduleWakeup` 제거됨.
 
 ## 현재 상태 (2026-05-01)
 
