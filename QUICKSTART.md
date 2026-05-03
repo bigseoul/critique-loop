@@ -48,6 +48,38 @@ tmux 윈도우 하나에:
 | "multiple codex panes" | codex pane 2개 이상 | `--codex-pane %N` 명시 |
 | 중간에 끊김 | Ctrl-C 또는 timeout | `/critique-loop --resume <run_id>` |
 
+## 실행 예
+
+```
+[Pane A — Claude]
+/critique-loop src/worker.py
+
+→ health check 중... (30초)
+→ round 1 비평 대기 중... (60초)
+
+[Pane B — Codex]
+@run-20260501-154500-a1b2c3/prompt-r1.md [critique-loop run=... round=1]
+
+  ## Findings
+  - severity: critical
+  - where: src/worker.py:42
+  - what breaks: shared dict에 lock 없이 접근
+  - suggested fix: threading.Lock 추가
+  - how to verify: 동시 요청 테스트
+
+  VERDICT: continue
+
+[Pane A — Claude]
+→ round 2 비평 대기 중... (60초)
+→ VERDICT: done
+
+## critique-loop 합성 보고 (run_id=run-20260501-154500-a1b2c3)
+- input: src/worker.py
+- round 1: critical 1개 → Accepted
+- round 2: 이슈 없음 → 조기 종료
+- 산출물: ~/.claude/cache/critique-loop/run-20260501-154500-a1b2c3/
+```
+
 ## 산출물 위치
 
 ```
