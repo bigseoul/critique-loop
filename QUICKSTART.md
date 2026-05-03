@@ -10,11 +10,15 @@ tmux 윈도우 하나에:
 
 ## 실행
 
+**Pane A (Claude Code)** 에서 입력:
+
 ```text
 /critique-loop src/foo.py        # 파일 리뷰
 /critique-loop --diff            # 현재 브랜치 변경사항 리뷰
 /critique-loop "이 설계 어때?"    # 텍스트 리뷰
 ```
+
+기본 라운드: **최대 3회** (VERDICT: done 나오면 조기 종료)
 
 ## 내부적으로 일어나는 일
 
