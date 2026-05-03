@@ -48,7 +48,7 @@ tmux 윈도우 하나에:
 | "multiple codex panes" | codex pane 2개 이상 | `--codex-pane %N` 명시 |
 | 중간에 끊김 | Ctrl-C 또는 timeout | `/critique-loop --resume <run_id>` |
 
-## 실행 예
+## 실행 예 1 — 코드 리뷰
 
 ```
 [Pane A — Claude]
@@ -58,26 +58,46 @@ tmux 윈도우 하나에:
 → round 1 비평 대기 중... (60초)
 
 [Pane B — Codex]
-@run-20260501-154500-a1b2c3/prompt-r1.md [critique-loop run=... round=1]
-
   ## Findings
-  - severity: critical
-  - where: src/worker.py:42
+  - severity: critical / where: src/worker.py:42
   - what breaks: shared dict에 lock 없이 접근
   - suggested fix: threading.Lock 추가
-  - how to verify: 동시 요청 테스트
-
   VERDICT: continue
 
 [Pane A — Claude]
 → round 2 비평 대기 중... (60초)
-→ VERDICT: done
+→ VERDICT: done → 합성 보고서 출력
+```
 
-## critique-loop 합성 보고 (run_id=run-20260501-154500-a1b2c3)
-- input: src/worker.py
-- round 1: critical 1개 → Accepted
-- round 2: 이슈 없음 → 조기 종료
-- 산출물: ~/.claude/cache/critique-loop/run-20260501-154500-a1b2c3/
+## 실행 예 2 — Claude가 제안한 설계를 Codex에게 비평
+
+Claude가 먼저 설계 제안을 출력한 뒤, 인자 없이 `/critique-loop`를 실행하면
+**직전 Claude 메시지**가 자동으로 입력으로 잡힌다.
+
+```
+[Pane A — Claude]
+  캐시 레이어를 Redis 대신 SQLite로 구현하려고 한다.
+  이유: 운영 복잡도를 낮추고 싶고, 트래픽이 초당 100건 이하라
+  Redis의 네트워크 오버헤드가 오히려 손해라고 판단함.
+
+/critique-loop          ← 인자 없이 실행 → 위 메시지가 입력
+
+→ health check 중... (30초)
+→ round 1 비평 대기 중... (60초)
+
+[Pane B — Codex]
+  ## Findings
+  - severity: high
+  - where: 설계 전제
+  - what breaks: SQLite는 write lock이 전체 DB를 잠가서
+                 동시 write가 몰리면 병목 발생
+  - suggested fix: WAL 모드 활성화 또는 write 경합 측정 후 결정
+  - how to verify: locust로 동시 write 100건 부하 테스트
+  VERDICT: continue
+
+[Pane A — Claude]
+→ round 2: WAL 모드 반영한 설계로 재비평 요청
+→ VERDICT: done → 합성 보고서 출력
 ```
 
 ## 산출물 위치
