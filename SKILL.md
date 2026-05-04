@@ -4,7 +4,7 @@ version: 0.1.0
 description: |
   같은 tmux 윈도우 안의 Claude pane과 Codex CLI pane 간 적대적 리뷰 루프.
   Claude가 N 라운드를 오케스트레이션한다: 프롬프트 파일 작성 → tmux paste-buffer로
-  Codex 깨우기 → ScheduleWakeup으로 슬립 → 비평 파싱 → 계속 진행 또는 합성 보고서 출력.
+  Codex 깨우기 → 블로킹 wait(file-poll)로 응답 대기 → 비평 파싱 → 계속 진행 또는 합성 보고서 출력.
   각 프롬프트에 self-contained 프로토콜이 포함되어 있어 Codex 측 사전 설치 불필요.
 triggers:
   - critique loop
@@ -16,13 +16,12 @@ allowed-tools:
   - Bash
   - Read
   - Write
-  - ScheduleWakeup
   - AskUserQuestion
 ---
 
 # critique-loop — Claude 오케스트레이션 절차
 
-> **실행 전에 처음부터 끝까지 읽을 것.** 절차는 엄격하다: 파일 쓰기, tmux push, ScheduleWakeup 핸드오프는 설명된 순서 그대로 수행해야 한다. health check를 건너뛰거나 wake 루프를 단축하면 조용히 실패한다.
+> **실행 전에 처음부터 끝까지 읽을 것.** 절차는 엄격하다: 파일 쓰기, tmux push, 블로킹 wait은 설명된 순서 그대로 수행해야 한다. health check를 건너뛰거나 wait timeout을 줄이면 조용히 실패한다.
 
 ## 이 스킬이 적용되는 경우
 
@@ -223,7 +222,7 @@ eval "$CL push --target '%N' --payload \"@$PROMPT_PATH [critique-loop run=<rid> 
 그 다음 **블로킹 wait** (60s 타임아웃):
 
 ```bash
-eval "$CL wait --run-id $RID --round 0 --timeout 60 --interval 0.25"
+eval "$CL wait --run-id $RID --round 0 --timeout 60"
 # {"state": "ready"|"timeout", "elapsed_s": N, "reason"?: "..."} 반환
 eval "$CL health-check --run-id $RID"
 ```
@@ -272,7 +271,7 @@ eval "$CL push --target '%N' --payload \"@$PROMPT_PATH [critique-loop run=<rid> 
 **5d. 블로킹 wait + check.**
 
 ```bash
-eval "$CL wait --run-id $RID --round $N --timeout 300 --interval 0.25"
+eval "$CL wait --run-id $RID --round $N --timeout 300"
 # state=ready면 파일 다 써진 상태. state=timeout이면 watchdog timeout.
 eval "$CL check --run-id $RID --round $N"
 ```

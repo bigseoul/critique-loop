@@ -80,21 +80,73 @@ def _save_state(run_dir: Path, state: dict) -> None:
 
 
 def _list_run_dirs(cache_root: Path) -> list[Path]:
+    """Return run directories under ``cache_root``, newest first.
+
+    Sorting uses filesystem ``st_mtime_ns`` so the order reflects actual
+    creation time rather than the run_id string. The run_id format
+    (``run-YYYYMMDD-HHMMSS-<random hex>``) collides on the random suffix
+    when multiple runs are created within the same second; lexicographic
+    sort would then mis-rank them — including ranking a *just-created* run
+    as "old" and exposing it to ``_auto_trim``. mtime sidesteps that.
+
+    Args:
+        cache_root: Directory containing ``run-*`` subdirectories. Missing
+            directory yields an empty list (not an error).
+
+    Returns:
+        List of run-directory paths, ordered newest → oldest.
+    """
     if not cache_root.exists():
         return []
-    return sorted(
-        (p for p in cache_root.iterdir()
-         if p.is_dir() and p.name.startswith("run-")),
-        key=lambda p: p.name,  # run-id name embeds timestamp → chronological
-        reverse=True,           # newest first
-    )
+    candidates: list[Path] = [
+        p for p in cache_root.iterdir()
+        if p.is_dir() and p.name.startswith("run-")
+    ]
+    return sorted(candidates, key=lambda p: p.stat().st_mtime_ns, reverse=True)
 
 
-def _auto_trim(cache_root: Path, keep: int | None = None) -> None:
-    # Read the module-level constant at call time so tests can monkeypatch it.
+def _auto_trim(
+    cache_root: Path,
+    keep: int | None = None,
+    protect: Path | None = None,
+) -> None:
+    """Delete oldest run directories, retaining at most ``keep`` of them.
+
+    Belt-and-suspenders policy:
+      1. Sort by ``st_mtime_ns`` (so "newest" is real wall-clock newest).
+      2. Never delete ``protect`` even if it sorts as oldest — guards against
+         filesystem clock skew or timestamp ties for a run we just created
+         and are about to return to the caller.
+
+    Args:
+        cache_root: Cache root containing ``run-*`` subdirectories.
+        keep: Maximum number of runs to retain. ``None`` reads the module
+            constant ``_AUTO_TRIM_KEEP`` at call time (so tests can
+            monkeypatch it).
+        protect: A run directory to exclude from deletion regardless of
+            its rank. Pass the freshly-created ``run_dir`` from ``cmd_init``.
+
+    Returns:
+        None. Side-effect only — runs ``shutil.rmtree`` on each victim.
+    """
     if keep is None:
         keep = _AUTO_TRIM_KEEP
-    for old in _list_run_dirs(cache_root)[keep:]:
+    runs: list[Path] = _list_run_dirs(cache_root)
+    survivors: list[Path] = runs[:keep]
+    victims: list[Path] = runs[keep:]
+    if protect is not None and protect not in survivors:
+        # protect was about to be deleted: swap it back in, evict the
+        # oldest survivor instead so we still honour `keep`.
+        if victims:
+            evicted: Path = survivors.pop()
+            survivors.append(protect)
+            victims = [v for v in victims if v != protect]
+            victims.append(evicted)
+        else:
+            # No victims at all: ensure protect is in survivors.
+            if protect not in survivors:
+                survivors.append(protect)
+    for old in victims:
         shutil.rmtree(old)
 
 
@@ -115,7 +167,7 @@ def cmd_init(a) -> int:
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _save_state(rd, state)
-    _auto_trim(DEFAULT_CACHE_ROOT)
+    _auto_trim(DEFAULT_CACHE_ROOT, protect=rd)
     print(json.dumps({"run_id": rid, "run_dir": str(rd)}))
     return 0
 

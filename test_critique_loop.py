@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -276,19 +277,87 @@ def test_synthesize_flags_rounds_without_verdict(monkeypatch, cache_root: Path):
 
 def test_init_auto_trims_to_keep_constant(monkeypatch, cache_root: Path):
     """init must silently delete oldest run directories beyond the auto-trim
-    threshold (default 10). The most recent _AUTO_TRIM_KEEP runs survive.
+    threshold. Survivors are the N **most recently created** (by mtime),
+    regardless of run_id name ordering.
     """
     monkeypatch.setattr(cl, "_AUTO_TRIM_KEEP", 3)  # shrink for fast test
-    rids = [_init_run(monkeypatch, cache_root) for _ in range(5)]
-    surviving = sorted(
-        (p.name for p in cache_root.iterdir() if p.name.startswith("run-")),
-        reverse=True,
-    )
+    rids: list[str] = [_init_run(monkeypatch, cache_root) for _ in range(5)]
+    surviving: set[str] = {
+        p.name for p in cache_root.iterdir() if p.name.startswith("run-")
+    }
     assert len(surviving) == 3, f"expected 3 survivors, got {len(surviving)}"
-    # Survivors must be the 3 newest (last 3 created → highest run_id when
-    # sorted descending by name, given monotonic timestamp+hex).
-    expected = sorted(rids, reverse=True)[:3]
-    assert sorted(surviving) == sorted(expected)
+    # The last 3 init calls in creation order are the expected survivors.
+    expected: set[str] = set(rids[-3:])
+    assert surviving == expected, (
+        f"survivors mismatch creation order: {surviving} vs {expected}"
+    )
+
+
+def test_init_returned_run_dir_always_exists_after_trim(monkeypatch, cache_root: Path):
+    """Regression: prior implementation sorted run dirs by name (random hex
+    suffix), so a just-created run could sort as "oldest" and get deleted by
+    auto-trim before init even returned. The returned run_dir must always
+    exist on disk.
+    """
+    monkeypatch.setattr(cl, "_AUTO_TRIM_KEEP", 3)
+    for _ in range(20):
+        rc, out, _ = _run(
+            monkeypatch, cache_root,
+            "init",
+            "--max-rounds", "1", "--codex-pane", "%6",
+            "--input-source", "x", "--input-body", "x",
+        )
+        assert rc == 0
+        payload = json.loads(out)
+        rd = Path(payload["run_dir"])
+        assert rd.exists(), f"init returned non-existent run_dir: {rd}"
+        assert (rd / "state.json").exists(), "state.json missing in returned run_dir"
+
+
+def test_auto_trim_uses_mtime_not_name(monkeypatch, cache_root: Path):
+    """Two run dirs with names whose lexicographic order is opposite to mtime
+    order: the one with newer mtime must survive trim, regardless of name.
+    """
+    older_name = "run-20260504-100000-zzzzzz"  # name sorts AFTER newer
+    newer_name = "run-20260504-100000-000000"  # name sorts BEFORE older
+    older_dir = cache_root / older_name
+    newer_dir = cache_root / newer_name
+    older_dir.mkdir()
+    newer_dir.mkdir()
+    # Older mtime, then newer mtime, with measurable gap.
+    older_mtime = 1_000_000_000
+    newer_mtime = 1_000_000_100
+    os.utime(older_dir, (older_mtime, older_mtime))
+    os.utime(newer_dir, (newer_mtime, newer_mtime))
+
+    monkeypatch.setattr(cl, "DEFAULT_CACHE_ROOT", cache_root)
+    cl._auto_trim(cache_root, keep=1)
+
+    assert newer_dir.exists(), "mtime-newest dir was wrongly deleted"
+    assert not older_dir.exists(), "mtime-oldest dir was kept"
+
+
+def test_auto_trim_protects_specified_dir(monkeypatch, cache_root: Path):
+    """`protect=` must shield a run dir from deletion even if it ranks as
+    oldest by mtime. Defense-in-depth for cmd_init's freshly-made dir.
+    """
+    # Three dirs, with the one we want to protect having the OLDEST mtime.
+    oldest = cache_root / "run-20260504-100000-aaaaaa"
+    middle = cache_root / "run-20260504-100000-bbbbbb"
+    newest = cache_root / "run-20260504-100000-cccccc"
+    for p in (oldest, middle, newest):
+        p.mkdir()
+    os.utime(oldest, (1_000, 1_000))
+    os.utime(middle, (2_000, 2_000))
+    os.utime(newest, (3_000, 3_000))
+
+    cl._auto_trim(cache_root, keep=2, protect=oldest)
+
+    # `oldest` must survive; `middle` (which would normally have ranked 2nd
+    # newest after `newest`) is evicted in its place.
+    assert oldest.exists(), "protect= did not shield oldest"
+    assert newest.exists()
+    assert not middle.exists(), "expected middle to be evicted in oldest's stead"
 
 
 def test_init_does_not_trim_when_under_threshold(monkeypatch, cache_root: Path):
