@@ -34,6 +34,8 @@ Claude Code 재시작 후 스킬 인식.
 
 산출물: `~/.claude/cache/critique-loop/<run_id>/`
 
+**캐시 정책:** 매 호출마다 새 run 디렉토리가 생기고, **최신 10개만 자동 유지**된다 (11번째 호출 시 가장 오래된 게 silent 삭제). 보존이 필요한 리뷰는 캐시 밖으로 복사할 것. 전체 reset은 `python3 critique_loop.py clean`.
+
 상세 절차는 `SKILL.md`. CLI 도움말은 `python3 critique_loop.py --help`.
 
 ## 개발

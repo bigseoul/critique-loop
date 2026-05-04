@@ -274,6 +274,49 @@ def test_synthesize_flags_rounds_without_verdict(monkeypatch, cache_root: Path):
     assert out.count("VERDICT 라인 없음") == 1
 
 
+def test_init_auto_trims_to_keep_constant(monkeypatch, cache_root: Path):
+    """init must silently delete oldest run directories beyond the auto-trim
+    threshold (default 10). The most recent _AUTO_TRIM_KEEP runs survive.
+    """
+    monkeypatch.setattr(cl, "_AUTO_TRIM_KEEP", 3)  # shrink for fast test
+    rids = [_init_run(monkeypatch, cache_root) for _ in range(5)]
+    surviving = sorted(
+        (p.name for p in cache_root.iterdir() if p.name.startswith("run-")),
+        reverse=True,
+    )
+    assert len(surviving) == 3, f"expected 3 survivors, got {len(surviving)}"
+    # Survivors must be the 3 newest (last 3 created → highest run_id when
+    # sorted descending by name, given monotonic timestamp+hex).
+    expected = sorted(rids, reverse=True)[:3]
+    assert sorted(surviving) == sorted(expected)
+
+
+def test_init_does_not_trim_when_under_threshold(monkeypatch, cache_root: Path):
+    monkeypatch.setattr(cl, "_AUTO_TRIM_KEEP", 5)
+    rids = [_init_run(monkeypatch, cache_root) for _ in range(3)]
+    surviving = [p.name for p in cache_root.iterdir() if p.name.startswith("run-")]
+    assert len(surviving) == 3
+    assert set(surviving) == set(rids)
+
+
+def test_clean_removes_all_runs(monkeypatch, cache_root: Path):
+    rids = [_init_run(monkeypatch, cache_root) for _ in range(3)]
+    rc, out, _ = _run(monkeypatch, cache_root, "clean")
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["count"] == 3
+    assert set(payload["deleted"]) == set(rids)
+    surviving = [p for p in cache_root.iterdir() if p.name.startswith("run-")]
+    assert surviving == []
+
+
+def test_clean_on_empty_cache(monkeypatch, cache_root: Path):
+    rc, out, _ = _run(monkeypatch, cache_root, "clean")
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload == {"deleted": [], "count": 0}
+
+
 def test_synthesize_concatenates_all_critiques(monkeypatch, cache_root: Path):
     rid = _init_run(monkeypatch, cache_root)
     (cache_root / rid / "critique-r1.md").write_text("R1: bad.\n\nVERDICT: continue\n")

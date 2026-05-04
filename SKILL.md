@@ -74,6 +74,7 @@ CL="python3 \"$HOME/.claude/skills/critique-loop/critique_loop.py\""
 | `check --run-id RID --round N` | `critique-rN.md` 검사; `{state: pending|done, verdict?: continue|done|unknown}` 출력. 빈 파일은 pending. |
 | `wait --run-id RID --round N [--interval 0.5] [--timeout 300]` | Codex가 `critique-rN.md`를 다 쓸 때까지 블로킹 polling. `{state: ready|timeout, elapsed_s, reason?}` 출력. ready 트리거 우선순위: 1순위 VERDICT 라인 또는 PONG, 2순위 size-stable(연속 4 polls 동안 size 변동 없음 = 기본 ~2초). |
 | `synthesize --run-id RID` | 모든 비평을 단일 사람이 읽을 수 있는 보고서로 연결 |
+| `clean` | 모든 run 디렉토리 삭제 (전체 reset). 부분 정리는 `init`의 auto-trim이 처리. |
 | `list` | run_id 목록 (최신순) |
 | `state --run-id RID` | 전체 `state.json` 출력 |
 
@@ -330,6 +331,22 @@ eval "$CL synthesize --run-id <run_id>"
 ```
 
 먼저 run_id 형식 확인 (반드시 `^run-\d{8}-\d{6}-[0-9a-f]{6}$` 매칭); CLI도 유효하지 않은 형식을 거부한다.
+
+### Cache 정리 (auto-trim + `clean`)
+
+캐시(`~/.claude/cache/critique-loop/<run_id>/`)는 두 단계로 관리된다:
+
+1. **Auto-trim (자동, 매 `init`마다):** 새 run 디렉토리 생성 직후 가장 오래된 디렉토리부터 잘라서 **최신 10개만 유지**. 11번째 이후 run을 만들면 가장 오래된 1개가 silent하게 `rmtree`된다. 임계값은 `_AUTO_TRIM_KEEP` 상수 (코드 수정 필요).
+2. **`clean` 서브커맨드 (수동):** 모든 run 디렉토리 삭제 (완전 reset).
+
+```bash
+eval "$CL clean"
+# {"deleted": ["run-...", "run-..."], "count": N} 출력
+```
+
+**보존 가치 있는 비평은 캐시 밖으로 옮겨야 한다.** 11번째 run 호출 시 가장 오래된 게 자동 삭제되므로, 캐시는 "최근 작업" 임시 저장소로만 신뢰 가능. 중요한 리뷰는 사용자가 별도 위치(repo 안 또는 메모)로 복사할 책임.
+
+사용자가 "캐시 정리" / "전체 삭제" 등을 요청할 때 `clean` 호출. "자동 삭제 안 되게 해달라"는 요청은 코드 수정 영역 (상수 변경 또는 auto-trim 비활성화).
 
 ### `--resume <run_id>`
 

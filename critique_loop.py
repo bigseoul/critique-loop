@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_CACHE_ROOT = Path.home() / ".claude" / "cache" / "critique-loop"
+
+# Auto-trim retention: `init` keeps this many most-recent run directories and
+# silently removes the rest. Policy is documented in SKILL.md / README.md;
+# users who want full history should copy runs out of the cache before they
+# fall off the edge.
+_AUTO_TRIM_KEEP = 10
 
 # Push payload allowlist: alphanumerics, common path chars, brackets, equals, spaces, @
 PAYLOAD_RE = re.compile(r"^@[A-Za-z0-9_./-]+ \[critique-loop [A-Za-z0-9_=. -]+\]$")
@@ -72,6 +79,25 @@ def _save_state(run_dir: Path, state: dict) -> None:
     (run_dir / "state.json").write_text(json.dumps(state, indent=2))
 
 
+def _list_run_dirs(cache_root: Path) -> list[Path]:
+    if not cache_root.exists():
+        return []
+    return sorted(
+        (p for p in cache_root.iterdir()
+         if p.is_dir() and p.name.startswith("run-")),
+        key=lambda p: p.name,  # run-id name embeds timestamp → chronological
+        reverse=True,           # newest first
+    )
+
+
+def _auto_trim(cache_root: Path, keep: int | None = None) -> None:
+    # Read the module-level constant at call time so tests can monkeypatch it.
+    if keep is None:
+        keep = _AUTO_TRIM_KEEP
+    for old in _list_run_dirs(cache_root)[keep:]:
+        shutil.rmtree(old)
+
+
 # --- subcommands ---
 
 def cmd_init(a) -> int:
@@ -89,6 +115,7 @@ def cmd_init(a) -> int:
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _save_state(rd, state)
+    _auto_trim(DEFAULT_CACHE_ROOT)
     print(json.dumps({"run_id": rid, "run_dir": str(rd)}))
     return 0
 
@@ -299,16 +326,23 @@ def cmd_synthesize(a) -> int:
     return 0
 
 
+def cmd_clean(a) -> int:
+    """Delete every run directory under the cache root.
+
+    Use this when you want to reset state. Auto-trim (in `init`) handles
+    routine pruning; this is the explicit nuke for "start fresh".
+    """
+    runs = _list_run_dirs(DEFAULT_CACHE_ROOT)
+    deleted = []
+    for p in runs:
+        shutil.rmtree(p)
+        deleted.append(p.name)
+    print(json.dumps({"deleted": deleted, "count": len(deleted)}))
+    return 0
+
+
 def cmd_list(a) -> int:
-    if not DEFAULT_CACHE_ROOT.exists():
-        print(json.dumps([]))
-        return 0
-    rids = sorted(
-        (p.name for p in DEFAULT_CACHE_ROOT.iterdir()
-         if p.is_dir() and p.name.startswith("run-")),
-        reverse=True,
-    )
-    print(json.dumps(rids))
+    print(json.dumps([p.name for p in _list_run_dirs(DEFAULT_CACHE_ROOT)]))
     return 0
 
 
@@ -360,6 +394,8 @@ def _build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("synthesize")
     s.add_argument("--run-id", required=True)
 
+    sub.add_parser("clean")
+
     sub.add_parser("list")
 
     s = sub.add_parser("state")
@@ -378,6 +414,7 @@ _DISPATCH = {
     "check": cmd_check,
     "wait": cmd_wait,
     "synthesize": cmd_synthesize,
+    "clean": cmd_clean,
     "list": cmd_list,
     "state": cmd_state,
 }
