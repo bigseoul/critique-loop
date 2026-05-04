@@ -1,4 +1,4 @@
-"""Tests for critique-loop. Just the essentials."""
+"""Tests for critique-with-codex. Just the essentials."""
 from __future__ import annotations
 
 import io
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import critique_loop as cl
+import critique_with_codex as cl
 
 
 # --- helpers ---
@@ -81,7 +81,7 @@ def test_prompt_writes_file_with_protocol_header(monkeypatch, cache_root: Path):
     expected_critique = str(cache_root / rid / "critique-r1.md")
     assert payload["prompt_path"] == expected_prompt
     body = (cache_root / rid / "prompt-r1.md").read_text()
-    assert "critique-loop protocol" in body
+    assert "critique-with-codex protocol" in body
     assert "round 1 of 3" in body
     # Critique target must be an absolute path so Codex doesn't `find` for it.
     assert expected_critique in body
@@ -103,7 +103,7 @@ def test_push_uses_bracketed_paste_via_tmux_buffer(monkeypatch, cache_root: Path
 
     monkeypatch.setattr(cl.time, "sleep", lambda s: sleeps.append(s))
 
-    payload = "@run-x/prompt-r1.md [critique-loop r=1]"
+    payload = "@run-x/prompt-r1.md [critique-with-codex r=1]"
     rc, out, _ = _run(
         monkeypatch, cache_root,
         "push", "--target", "%6",

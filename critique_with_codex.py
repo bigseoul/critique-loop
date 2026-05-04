@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""critique-loop: adversarial review loop between Claude (this pane) and Codex (sibling pane).
+"""critique-with-codex: adversarial review loop between Claude (this pane) and Codex (sibling pane).
 
 Single-file implementation. CLI subcommands invoked by SKILL.md.
 """
@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_CACHE_ROOT = Path.home() / ".claude" / "cache" / "critique-loop"
+DEFAULT_CACHE_ROOT = Path.home() / ".claude" / "cache" / "critique-with-codex"
 
 # Auto-trim retention: `init` keeps this many most-recent run directories and
 # silently removes the rest. Policy is documented in SKILL.md / README.md;
@@ -26,10 +26,10 @@ DEFAULT_CACHE_ROOT = Path.home() / ".claude" / "cache" / "critique-loop"
 _AUTO_TRIM_KEEP = 10
 
 # Push payload allowlist: alphanumerics, common path chars, brackets, equals, spaces, @
-PAYLOAD_RE = re.compile(r"^@[A-Za-z0-9_./-]+ \[critique-loop [A-Za-z0-9_=. -]+\]$")
+PAYLOAD_RE = re.compile(r"^@[A-Za-z0-9_./-]+ \[critique-with-codex [A-Za-z0-9_=. -]+\]$")
 
 PROTOCOL_HEADER = """\
-# critique-loop protocol
+# critique-with-codex protocol
 You are an adversarial code reviewer. This is round {round_n} of {max_rounds}.
 
 Write your critique to this exact absolute path (do NOT search for it; create the file):
@@ -45,8 +45,8 @@ Do not write to any other path. Do not send tmux commands.
 """
 
 HEALTH_PROMPT = """\
-# critique-loop protocol — health check
-[critique-loop ping]
+# critique-with-codex protocol — health check
+[critique-with-codex ping]
 
 Reply by writing this exact absolute path (do NOT search for it; create the file):
 {critique_path}
@@ -227,7 +227,7 @@ def cmd_push(a) -> int:
     # empty, so any subsequent Enter is a no-op). Use load-buffer + paste-buffer
     # so tmux wraps the payload in bracketed-paste (ESC[200~ ... ESC[201~), which
     # Codex accepts as a single paste block, then send Enter to submit.
-    buf = f"critique-loop-{os.getpid()}"
+    buf = f"critique-with-codex-{os.getpid()}"
     subprocess.run(
         ["tmux", "load-buffer", "-b", buf, "-"],
         input=a.payload, text=True, check=False,
@@ -355,7 +355,7 @@ def cmd_synthesize(a) -> int:
     rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
     state = _load_state(rd)
     out: list[str] = []
-    out.append(f"## critique-loop 합성 보고 (run_id={a.run_id})")
+    out.append(f"## critique-with-codex 합성 보고 (run_id={a.run_id})")
     out.append(f"- input: {state['input_source']}")
     out.append(f"- max_rounds={state['max_rounds']}")
     out.append("")
@@ -407,7 +407,7 @@ def cmd_state(a) -> int:
 # --- argparse ---
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="critique-loop")
+    p = argparse.ArgumentParser(prog="critique-with-codex")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init")
