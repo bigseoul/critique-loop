@@ -30,7 +30,7 @@ PAYLOAD_RE = re.compile(r"^@[A-Za-z0-9_./-]+ \[critique-with-codex [A-Za-z0-9_=.
 
 PROTOCOL_HEADER = """\
 # critique-with-codex protocol
-You are an adversarial code reviewer. This is round {round_n} of {max_rounds}.
+You are an adversarial plan/design reviewer. Round {round_info}.
 
 Write your critique to this exact absolute path (do NOT search for it; create the file):
 {critique_path}
@@ -39,7 +39,12 @@ Format: free-form markdown, with the LAST LINE being exactly one of:
 - `VERDICT: continue` (more rounds may help)
 - `VERDICT: done` (no critical or high-severity issues remain)
 
-Each finding should include: severity (critical/high/medium/low/nit), where (file:line or quote), what breaks, suggested fix, and how to verify the fix.
+Note: Claude updates the plan each round to reflect your critique before the next round.
+Critique the artifact as presented — resolved findings from prior rounds need not be repeated.
+
+Each finding should include: severity (critical/high/medium/low/nit), where (section or quote),
+what is wrong or missing (logic gap, unstated assumption, missing edge case, infeasible step,
+scope leak, missing dependency, sequencing error), suggested fix, and how to verify the fix.
 
 Do not write to any other path. Do not send tmux commands.
 """
@@ -157,14 +162,32 @@ def cmd_init(a) -> int:
     DEFAULT_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     rd = _run_dir(DEFAULT_CACHE_ROOT, rid)
     rd.mkdir()
+
+    interactive = not a.auto
+    if interactive and a.max_rounds is not None:
+        print("warning: --max-rounds is ignored in interactive mode (use --auto to enable a round limit)", file=sys.stderr)
+    if a.max_rounds is not None and (a.max_rounds < 1 or a.max_rounds > 10):
+        print(f"error: --max-rounds must be between 1 and 10, got {a.max_rounds}", file=sys.stderr)
+        rd.rmdir()
+        return 2
+    max_rounds = None if interactive else (a.max_rounds if a.max_rounds is not None else 3)
+
+    plan_v1 = rd / "plan-v1.md"
+    plan_v1.write_text(a.input_body)
+
     state = {
         "run_id": rid,
         "round": 0,
-        "max_rounds": a.max_rounds,
+        "max_rounds": max_rounds,
         "codex_pane": a.codex_pane,
         "input_source": a.input_source,
         "input_body": a.input_body,
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "interactive": interactive,
+        "current_plan_path": str(plan_v1),
+        "current_plan_version": 1,
+        "draft_plan_path": None,
+        "awaiting_user_review": False,
     }
     _save_state(rd, state)
     _auto_trim(DEFAULT_CACHE_ROOT, protect=rd)
@@ -201,15 +224,38 @@ def cmd_prompt(a) -> int:
     state = _load_state(rd)
     prompt_path = rd / f"prompt-r{a.round}.md"
     critique_path = rd / f"critique-r{a.round}.md"
-    body = PROTOCOL_HEADER.format(
-        round_n=a.round, max_rounds=state["max_rounds"], critique_path=str(critique_path),
-    )
+
+    max_rounds = state.get("max_rounds")
+    round_info = f"{a.round} of {max_rounds}" if max_rounds else str(a.round)
+
+    body = PROTOCOL_HEADER.format(round_info=round_info, critique_path=str(critique_path))
     if a.prior_summary.strip():
         body += "\n## Prior rounds\n\n" + a.prior_summary + "\n"
+
+    current_plan_path = state.get("current_plan_path")
+    if not current_plan_path:
+        # Legacy run (pre-v0.2): lazily materialise plan-v1.md from input_body.
+        input_body = state.get("input_body")
+        if not input_body:
+            print("error: state has neither current_plan_path nor input_body — run init first", file=sys.stderr)
+            return 2
+        plan_path = rd / "plan-v1.md"
+        plan_path.write_text(input_body)
+        state["current_plan_path"] = str(plan_path)
+        state["current_plan_version"] = 1
+        _save_state(rd, state)
+    else:
+        plan_path = Path(current_plan_path)
+    if not plan_path.exists():
+        print(f"error: current_plan_path does not exist: {plan_path}", file=sys.stderr)
+        return 2
+    plan_content = plan_path.read_text()
+    plan_source = str(plan_path)
+
     body += (
         f"\n## Artifact under review\n"
-        f"- source: {state['input_source']}\n\n"
-        f"```\n{state['input_body']}\n```\n"
+        f"- source: {plan_source}\n\n"
+        f"```\n{plan_content}\n```\n"
     )
     prompt_path.write_text(body)
     state["round"] = a.round
@@ -357,24 +403,88 @@ def cmd_synthesize(a) -> int:
     out: list[str] = []
     out.append(f"## critique-with-codex 합성 보고 (run_id={a.run_id})")
     out.append(f"- input: {state['input_source']}")
-    out.append(f"- max_rounds={state['max_rounds']}")
+
+    current_version = state.get("current_plan_version", 1)
+    if current_version > 1:
+        chain = " → ".join(f"v{i}" for i in range(1, current_version + 1))
+        out.append(f"- Plan versions: {chain}")
+        out.append(f"- Final plan: {state.get('current_plan_path', 'N/A')}")
+    else:
+        out.append(f"- Plan: {state.get('current_plan_path', state['input_source'])}")
     out.append("")
-    for n in range(1, state["max_rounds"] + 1):
-        f = rd / f"critique-r{n}.md"
-        if not f.exists():
-            continue
+
+    critique_files = sorted(
+        (f for f in rd.glob("critique-r*.md") if f.name != "critique-r0.md"),
+        key=lambda p: int(re.search(r"(\d+)", p.name).group(1)),
+    )
+    last_round = max(
+        (int(re.search(r"(\d+)", f.name).group(1)) for f in critique_files), default=0
+    )
+
+    for f in critique_files:
+        n = int(re.search(r"(\d+)", f.name).group(1))
         text = f.read_text().rstrip()
         last = text.splitlines()[-1].strip() if text else ""
         has_verdict = bool(_VERDICT_RE.match(last))
         out.append(f"### Round {n}")
         if not has_verdict:
-            out.append("> ⚠ VERDICT 라인 없음 — `wait`가 size-stable fallback으로 종료를 감지했을 수 있음. 응답이 잘렸거나 프로토콜 미준수일 가능성 검토.")
+            out.append("> ⚠ VERDICT 라인 없음 — size-stable fallback으로 완료 감지. 잘렸거나 프로토콜 미준수 가능성.")
             out.append("")
         out.append(text)
         out.append("")
-    out.append(f"### 산출물")
-    out.append(f"- {rd}")
+
+    out.append("### 산출물")
+    out.append(f"- Run dir: {rd}")
+    if last_round:
+        out.append(f"- Critiques: {rd}/critique-r{{1..{last_round}}}.md")
     print("\n".join(out))
+    return 0
+
+
+def cmd_save_plan_version(a) -> int:
+    rd = _run_dir(DEFAULT_CACHE_ROOT, a.run_id)
+    state = _load_state(rd)
+
+    if a.action == "draft":
+        if not a.content_file:
+            print("error: --content-file required with --draft", file=sys.stderr)
+            return 2
+        content = Path(a.content_file).read_text()
+        draft_path = rd / f"plan-v{a.version}.draft.md"
+        draft_path.write_text(content)
+        state["draft_plan_path"] = str(draft_path)
+        state["awaiting_user_review"] = True
+        _save_state(rd, state)
+        print(json.dumps({"plan_path": str(draft_path), "version": a.version, "approved": False}))
+    elif a.action == "approve":
+        draft_path_str = state.get("draft_plan_path")
+        if not draft_path_str:
+            print("error: no draft_plan_path in state; call --draft first", file=sys.stderr)
+            return 2
+        draft_path = Path(draft_path_str)
+        m = re.search(r"plan-v(\d+)\.draft\.md$", draft_path.name)
+        if not m or int(m.group(1)) != a.version:
+            draft_ver = m.group(1) if m else "?"
+            print(f"error: version mismatch — draft is v{draft_ver}, --version {a.version} given", file=sys.stderr)
+            return 2
+        approved_path = rd / f"plan-v{a.version}.md"
+        draft_path.rename(approved_path)
+        state["current_plan_path"] = str(approved_path)
+        state["current_plan_version"] = a.version
+        state["draft_plan_path"] = None
+        state["awaiting_user_review"] = False
+        _save_state(rd, state)
+        print(json.dumps({"plan_path": str(approved_path), "version": a.version, "approved": True}))
+    else:  # discard
+        draft_path_str = state.get("draft_plan_path")
+        if draft_path_str:
+            draft_path = Path(draft_path_str)
+            if draft_path.exists():
+                draft_path.unlink()
+        state["draft_plan_path"] = None
+        state["awaiting_user_review"] = False
+        _save_state(rd, state)
+        print(json.dumps({"discarded": True, "current_plan_path": state.get("current_plan_path")}))
     return 0
 
 
@@ -411,10 +521,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init")
-    s.add_argument("--max-rounds", type=int, required=True)
+    s.add_argument("--max-rounds", type=int, default=None)
     s.add_argument("--codex-pane", required=True)
     s.add_argument("--input-source", required=True)
     s.add_argument("--input-body", required=True)
+    s.add_argument("--auto", action="store_true", default=False)
 
     s = sub.add_parser("health-prompt")
     s.add_argument("--run-id", required=True)
@@ -446,6 +557,15 @@ def _build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("synthesize")
     s.add_argument("--run-id", required=True)
 
+    s = sub.add_parser("save-plan-version")
+    s.add_argument("--run-id", required=True)
+    s.add_argument("--version", type=int, required=True)
+    grp = s.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--draft", dest="action", action="store_const", const="draft")
+    grp.add_argument("--approve", dest="action", action="store_const", const="approve")
+    grp.add_argument("--discard", dest="action", action="store_const", const="discard")
+    s.add_argument("--content-file")
+
     sub.add_parser("clean")
 
     sub.add_parser("list")
@@ -466,6 +586,7 @@ _DISPATCH = {
     "check": cmd_check,
     "wait": cmd_wait,
     "synthesize": cmd_synthesize,
+    "save-plan-version": cmd_save_plan_version,
     "clean": cmd_clean,
     "list": cmd_list,
     "state": cmd_state,

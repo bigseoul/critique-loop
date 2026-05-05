@@ -34,10 +34,24 @@ def cache_root(tmp_path: Path) -> Path:
 
 
 def _init_run(monkeypatch, cache_root: Path, body: str = "x") -> str:
+    """Interactive mode (default): no --auto, no max_rounds."""
     rc, out, _ = _run(
         monkeypatch, cache_root,
         "init",
-        "--max-rounds", "3",
+        "--codex-pane", "%6",
+        "--input-source", "src/foo.py",
+        "--input-body", body,
+    )
+    assert rc == 0
+    return json.loads(out)["run_id"]
+
+
+def _init_run_auto(monkeypatch, cache_root: Path, body: str = "x", rounds: int = 3) -> str:
+    """--auto mode: max_rounds required, no interactive checkpoint."""
+    rc, out, _ = _run(
+        monkeypatch, cache_root,
+        "init",
+        "--auto", "--max-rounds", str(rounds),
         "--codex-pane", "%6",
         "--input-source", "src/foo.py",
         "--input-body", body,
@@ -48,11 +62,49 @@ def _init_run(monkeypatch, cache_root: Path, body: str = "x") -> str:
 
 # --- tests ---
 
+def test_init_rejects_max_rounds_above_10(monkeypatch, cache_root: Path):
+    rc, _, err = _run(
+        monkeypatch, cache_root,
+        "init", "--auto", "--max-rounds", "11",
+        "--codex-pane", "%6",
+        "--input-source", "plan.md",
+        "--input-body", "x",
+    )
+    assert rc == 2
+    assert "10" in err
+
+
+def test_init_rejects_max_rounds_zero(monkeypatch, cache_root: Path):
+    rc, _, err = _run(
+        monkeypatch, cache_root,
+        "init", "--auto", "--max-rounds", "0",
+        "--codex-pane", "%6",
+        "--input-source", "plan.md",
+        "--input-body", "x",
+    )
+    assert rc == 2
+    assert "1" in err
+
+
+def test_save_plan_version_approve_version_mismatch(monkeypatch, tmp_path, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root, body="v1")
+    draft_file = tmp_path / "draft.md"
+    draft_file.write_text("v2 content")
+    _run(monkeypatch, cache_root,
+         "save-plan-version", "--run-id", rid, "--version", "2",
+         "--draft", "--content-file", str(draft_file))
+    rc, _, err = _run(
+        monkeypatch, cache_root,
+        "save-plan-version", "--run-id", rid, "--version", "3", "--approve",
+    )
+    assert rc == 2
+    assert "mismatch" in err
+
+
 def test_init_creates_run_and_state(monkeypatch, cache_root: Path):
     rc, out, _ = _run(
         monkeypatch, cache_root,
         "init",
-        "--max-rounds", "3",
         "--codex-pane", "%6",
         "--input-source", "src/foo.py",
         "--input-body", "def x(): return 1",
@@ -62,14 +114,22 @@ def test_init_creates_run_and_state(monkeypatch, cache_root: Path):
     rid = payload["run_id"]
     assert re.match(r"^run-\d{8}-\d{6}-[0-9a-f]{6}$", rid)
     state = json.loads((cache_root / rid / "state.json").read_text())
-    assert state["max_rounds"] == 3
+    assert state["interactive"] is True
+    assert state["max_rounds"] is None
     assert state["codex_pane"] == "%6"
     assert state["input_source"] == "src/foo.py"
     assert state["round"] == 0
 
 
+def test_init_auto_mode_sets_max_rounds(monkeypatch, cache_root: Path):
+    rid = _init_run_auto(monkeypatch, cache_root, rounds=5)
+    state = json.loads((cache_root / rid / "state.json").read_text())
+    assert state["interactive"] is False
+    assert state["max_rounds"] == 5
+
+
 def test_prompt_writes_file_with_protocol_header(monkeypatch, cache_root: Path):
-    rid = _init_run(monkeypatch, cache_root, body="content X")
+    rid = _init_run_auto(monkeypatch, cache_root, body="content X", rounds=3)
     rc, out, _ = _run(
         monkeypatch, cache_root,
         "prompt", "--run-id", rid, "--round", "1",
@@ -82,7 +142,7 @@ def test_prompt_writes_file_with_protocol_header(monkeypatch, cache_root: Path):
     assert payload["prompt_path"] == expected_prompt
     body = (cache_root / rid / "prompt-r1.md").read_text()
     assert "critique-with-codex protocol" in body
-    assert "round 1 of 3" in body
+    assert "1 of 3" in body
     # Critique target must be an absolute path so Codex doesn't `find` for it.
     assert expected_critique in body
     assert "VERDICT:" in body
@@ -281,7 +341,7 @@ def test_init_auto_trims_to_keep_constant(monkeypatch, cache_root: Path):
     regardless of run_id name ordering.
     """
     monkeypatch.setattr(cl, "_AUTO_TRIM_KEEP", 3)  # shrink for fast test
-    rids: list[str] = [_init_run(monkeypatch, cache_root) for _ in range(5)]
+    rids: list[str] = [_init_run_auto(monkeypatch, cache_root) for _ in range(5)]
     surviving: set[str] = {
         p.name for p in cache_root.iterdir() if p.name.startswith("run-")
     }
@@ -304,7 +364,7 @@ def test_init_returned_run_dir_always_exists_after_trim(monkeypatch, cache_root:
         rc, out, _ = _run(
             monkeypatch, cache_root,
             "init",
-            "--max-rounds", "1", "--codex-pane", "%6",
+            "--auto", "--max-rounds", "1", "--codex-pane", "%6",
             "--input-source", "x", "--input-body", "x",
         )
         assert rc == 0
@@ -366,6 +426,102 @@ def test_init_does_not_trim_when_under_threshold(monkeypatch, cache_root: Path):
     surviving = [p.name for p in cache_root.iterdir() if p.name.startswith("run-")]
     assert len(surviving) == 3
     assert set(surviving) == set(rids)
+
+
+# --- v0.2 tests ---
+
+def test_init_creates_plan_v1(monkeypatch, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root, body="my plan content")
+    state = json.loads((cache_root / rid / "state.json").read_text())
+    plan_v1 = Path(state["current_plan_path"])
+    assert plan_v1.exists()
+    assert plan_v1.name == "plan-v1.md"
+    assert plan_v1.read_text() == "my plan content"
+    assert state["current_plan_version"] == 1
+    assert state["draft_plan_path"] is None
+    assert state["awaiting_user_review"] is False
+
+
+def test_prompt_uses_current_plan_path(monkeypatch, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root, body="original plan")
+    # Simulate plan update: overwrite plan-v1.md with new content
+    state = json.loads((cache_root / rid / "state.json").read_text())
+    Path(state["current_plan_path"]).write_text("updated plan content")
+    rc, out, _ = _run(
+        monkeypatch, cache_root,
+        "prompt", "--run-id", rid, "--round", "1", "--prior-summary", "",
+    )
+    assert rc == 0
+    body = (cache_root / rid / "prompt-r1.md").read_text()
+    assert "updated plan content" in body
+    assert "original plan" not in body
+
+
+def test_prompt_legacy_run_lazy_creates_plan_v1(monkeypatch, cache_root: Path):
+    """pre-v0.2 state (no current_plan_path) must lazily create plan-v1.md."""
+    rid = _init_run(monkeypatch, cache_root, body="legacy body")
+    state_path = cache_root / rid / "state.json"
+    state = json.loads(state_path.read_text())
+    del state["current_plan_path"]
+    del state["current_plan_version"]
+    state_path.write_text(json.dumps(state))
+    (cache_root / rid / "plan-v1.md").unlink(missing_ok=True)
+
+    rc, out, _ = _run(
+        monkeypatch, cache_root,
+        "prompt", "--run-id", rid, "--round", "1", "--prior-summary", "",
+    )
+    assert rc == 0
+    body = (cache_root / rid / "prompt-r1.md").read_text()
+    assert "legacy body" in body
+    assert (cache_root / rid / "plan-v1.md").exists()
+    new_state = json.loads((cache_root / rid / "state.json").read_text())
+    assert new_state["current_plan_path"].endswith("plan-v1.md")
+
+
+def test_save_plan_version_draft_and_approve(monkeypatch, tmp_path, cache_root: Path):
+    rid = _init_run(monkeypatch, cache_root, body="v1 content")
+    draft_file = tmp_path / "draft.md"
+    draft_file.write_text("v2 draft content")
+
+    # Save draft
+    rc, out, _ = _run(
+        monkeypatch, cache_root,
+        "save-plan-version", "--run-id", rid, "--version", "2",
+        "--draft", "--content-file", str(draft_file),
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["approved"] is False
+    assert payload["version"] == 2
+    draft_path = Path(payload["plan_path"])
+    assert draft_path.name == "plan-v2.draft.md"
+    assert draft_path.exists()
+    assert draft_path.read_text() == "v2 draft content"
+
+    state = json.loads((cache_root / rid / "state.json").read_text())
+    assert state["awaiting_user_review"] is True
+    assert state["draft_plan_path"] == str(draft_path)
+    assert state["current_plan_version"] == 1  # not yet approved
+
+    # Approve
+    rc, out, _ = _run(
+        monkeypatch, cache_root,
+        "save-plan-version", "--run-id", rid, "--version", "2", "--approve",
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["approved"] is True
+    approved_path = Path(payload["plan_path"])
+    assert approved_path.name == "plan-v2.md"
+    assert approved_path.exists()
+    assert not draft_path.exists()  # draft renamed away
+
+    state = json.loads((cache_root / rid / "state.json").read_text())
+    assert state["current_plan_path"] == str(approved_path)
+    assert state["current_plan_version"] == 2
+    assert state["draft_plan_path"] is None
+    assert state["awaiting_user_review"] is False
 
 
 def test_clean_removes_all_runs(monkeypatch, cache_root: Path):

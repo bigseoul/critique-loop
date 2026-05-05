@@ -1,16 +1,16 @@
 ---
 name: critique-with-codex
-version: 0.1.0
+version: 0.2.0
 description: |
-  같은 tmux 윈도우 안의 Claude pane과 Codex CLI pane 간 적대적 리뷰 루프.
-  Claude가 N 라운드를 오케스트레이션한다: 프롬프트 파일 작성 → tmux paste-buffer로
-  Codex 깨우기 → 블로킹 wait(file-poll)로 응답 대기 → 비평 파싱 → 계속 진행 또는 합성 보고서 출력.
-  각 프롬프트에 self-contained 프로토콜이 포함되어 있어 Codex 측 사전 설치 불필요.
+  코드를 짜기 전 단계에서 계획/설계 문서를 Codex와 함께 반복 정제하는 도구.
+  Claude가 N 라운드를 오케스트레이션한다: Codex가 plan을 비평 → Claude가 반영해 새 버전 작성 →
+  사용자 승인 → 다음 라운드. 아티팩트가 라운드를 거치며 진화한다.
+  코드 diff 리뷰는 /codex를 사용할 것. 이 스킬은 pre-code 단계 전용.
 triggers:
-  - critique loop
-  - codex review loop
-  - 코덱스한테 리뷰
-  - tmux 리뷰 루프
+  - plan refinement
+  - design review loop
+  - 설계 문서 정제
+  - 계획 리뷰 루프
   - /critique-with-codex
 allowed-tools:
   - Bash
@@ -25,7 +25,9 @@ allowed-tools:
 
 ## 이 스킬이 적용되는 경우
 
-사용자가 코드, diff, 스펙, 또는 자유 텍스트에 대한 적대적 Codex 리뷰를 요청할 때 — 보통 `/critique-with-codex`, "critique loop", "codex review loop", 또는 한국어 동의어로 호출.
+사용자가 **코드를 짜기 전** 단계에서 설계 문서, 아키텍처 계획, 스펙, 기능 제안 등을 Codex와 함께 반복 정제하려 할 때 — 보통 `/critique-with-codex`, "plan refinement", "설계 문서 정제", 또는 한국어 동의어로 호출.
+
+**코드 diff 리뷰가 목적이라면 `/codex`를 사용할 것.** 이 스킬은 아티팩트가 라운드를 거쳐 진화해야 의미 있는 pre-code 단계 전용이다.
 
 **사전 조건** (Step 1 전에 확인; 하나라도 실패하면 구체적인 해결책과 함께 중단):
 
@@ -37,20 +39,21 @@ allowed-tools:
 ## CLI 사용법 (사용자가 입력하는 것)
 
 ```text
-/critique-with-codex                           # 직전 Claude 메시지/제안 리뷰
-/critique-with-codex <file>                    # 파일 내용 리뷰
-/critique-with-codex --diff                    # 현 브랜치 diff vs base 리뷰
-/critique-with-codex "자유 텍스트 제안"          # 자유 텍스트 리뷰
-/critique-with-codex --rounds N <input>        # max_rounds 오버라이드 (1..10, 기본 3)
-/critique-with-codex --codex-pane <pane_id> <input>   # pane 명시 (예: %23)
-/critique-with-codex --no-health <input>       # ⚠ round-0 health check 생략 (unsafe; 디버그 전용)
+/critique-with-codex plan.md                   # 설계 문서 정제 (인터랙티브, 기본)
+/critique-with-codex spec.md                   # 스펙 정제
+/critique-with-codex "아키텍처 제안 텍스트"       # 자유 텍스트 정제
+/critique-with-codex --auto plan.md            # 비대화형 자동 모드 (max_rounds 도달 시 종료)
+/critique-with-codex --auto --rounds N plan.md # --auto 전용 max_rounds 오버라이드 (1..10, 기본 3)
+/critique-with-codex --codex-pane <pane_id> plan.md   # pane 명시 (예: %23)
+/critique-with-codex --no-health plan.md       # ⚠ round-0 health check 생략 (unsafe; 디버그 전용)
 /critique-with-codex --resume <run_id>         # 중단된 run 재개
-/critique-with-codex --health                  # standalone health check, 리뷰 없음
+/critique-with-codex --health                  # standalone health check, 정제 없음
 /critique-with-codex --list                    # 최근 run_id 목록
 /critique-with-codex --show <run_id>           # 과거 run의 합성 보고서 재출력
 ```
 
-기본값: `max_rounds=3`, `watchdog_total=300s` (라운드당), `health=on`.
+기본값: **인터랙티브 모드** (max_rounds 없음, 사용자 "stop" 또는 VERDICT=done으로 종료), `watchdog_total=300s` (라운드당), `health=on`.
+`--auto` 사용 시: `max_rounds=3` (기본), 체크포인트 생략. **`--auto`도 매 라운드 Claude가 plan을 수정함 — v0.1과 다름.**
 
 ## 백킹 CLI
 
@@ -65,14 +68,15 @@ CL="python3 \"$HOME/.claude/skills/critique-with-codex/critique_with_codex.py\""
 | 서브커맨드 | 용도 |
 |---|---|
 | `pane-discover` | 현재 윈도우에서 sibling codex pane 찾기 |
-| `init --max-rounds N --codex-pane PID --input-source S --input-body B` | run 디렉토리 + `state.json` 생성; `{run_id, run_dir}` 출력 |
+| `init --codex-pane PID --input-source S --input-body B [--auto] [--max-rounds N]` | run 디렉토리 + `state.json` + `plan-v1.md` 생성; `{run_id, run_dir}` 출력. `--auto` 없으면 interactive 모드 (max_rounds=null). `--auto`면 max_rounds=N (기본 3). |
 | `health-prompt --run-id RID` | `prompt-r0.md` (PONG ping) 작성 |
 | `health-check --run-id RID` | `critique-r0.md` 읽기; `{ok, diagnosis}` 출력 |
-| `prompt --run-id RID --round N [--prior-summary S]` | `prompt-rN.md` 작성 |
+| `prompt --run-id RID --round N [--prior-summary S]` | `prompt-rN.md` 작성. artifact는 `state.current_plan_path` 파일 내용 (매 라운드 최신 승인 plan 사용). |
 | `push --target PID --payload P` | bracketed-paste로 Codex 깨우기 (payload를 allowlist 정규식으로 검증) |
 | `check --run-id RID --round N` | `critique-rN.md` 검사; `{state: pending|done, verdict?: continue|done|unknown}` 출력. 빈 파일은 pending. |
 | `wait --run-id RID --round N [--interval 0.5] [--timeout 300]` | Codex가 `critique-rN.md`를 다 쓸 때까지 블로킹 polling. `{state: ready|timeout, elapsed_s, reason?}` 출력. ready 트리거 우선순위: 1순위 VERDICT 라인 또는 PONG, 2순위 size-stable(연속 4 polls 동안 size 변동 없음 = 기본 ~2초). |
-| `synthesize --run-id RID` | 모든 비평을 단일 사람이 읽을 수 있는 보고서로 연결 |
+| `save-plan-version --run-id RID --version N (--draft --content-file PATH \| --approve \| --discard)` | draft 관리. `--draft`: content를 `plan-vN.draft.md`로 저장, `awaiting_user_review=true`. `--approve`: draft를 `plan-vN.md`로 rename, `current_plan_path` 갱신. `--discard`: draft 파일 삭제, `awaiting_user_review=false`, `current_plan_path`는 마지막 승인본 유지 (stop 처리용). |
+| `synthesize --run-id RID` | plan version chain + 최종 plan 경로 + 모든 critique 출력 |
 | `clean` | 모든 run 디렉토리 삭제 (전체 reset). 부분 정리는 `init`의 auto-trim이 처리. |
 | `list` | run_id 목록 (최신순) |
 | `state --run-id RID` | 전체 `state.json` 출력 |
@@ -131,13 +135,13 @@ CL="python3 \"$HOME/.claude/skills/critique-with-codex/critique_with_codex.py\""
 **Prompt 파일 본문 (review round):**
 ```markdown
 # critique-with-codex protocol
-You are an adversarial code reviewer. Round N of M.
+You are an adversarial plan/design reviewer. Round N of M.
 
 Write your critique to this exact absolute path (do NOT search for it):
 /Users/.../critique-rN.md
 
 ... (포맷 규칙: 마지막 줄은 VERDICT: continue|done)
-... (이전 라운드 요약, 리뷰 대상 본문)
+... (이전 라운드 요약, 리뷰 대상 plan 본문)
 ```
 
 **Critique 파일 (Codex → Claude):**
@@ -176,10 +180,10 @@ VERDICT: continue
 
 | 형태 | `input_source` | `input_body` |
 |---|---|---|
-| `/critique-with-codex` (인자 없음) | `prior-message` | 직전 Claude 메시지/제안 텍스트 |
 | `/critique-with-codex <path>` | `<path>` | 파일 읽기 (Read 툴 사용, `cat` 아님) |
-| `/critique-with-codex --diff` | `git-diff` | `git diff "$(git merge-base HEAD main)...HEAD"` 출력 (`main` 없으면 `master` 시도) |
 | `/critique-with-codex "..."` | `inline-text` | 따옴표 안의 텍스트 그대로 |
+
+> **코드 diff 리뷰가 목적이면 `/codex`를 사용할 것.** `--diff`나 "직전 메시지 리뷰"는 이 스킬의 범위 밖이다.
 
 resolved body가 비어있거나 ~200 KB 초과이면 진행 전 `AskUserQuestion`으로 사용자에게 확인.
 
@@ -199,12 +203,21 @@ eval "$CL pane-discover"
 
 ### Step 3 — `init`
 
+**인터랙티브 모드 (기본):**
 ```bash
-eval "$CL init --max-rounds 3 --codex-pane '%N' \
+eval "$CL init --codex-pane '%N' \
+  --input-source 'src/foo.py' --input-body \"$(cat /tmp/cl-input.txt)\""
+```
+
+**비대화형 자동 모드 (`--auto`):**
+```bash
+eval "$CL init --auto --max-rounds 3 --codex-pane '%N' \
   --input-source 'src/foo.py' --input-body \"$(cat /tmp/cl-input.txt)\""
 ```
 
 body는 임시 파일이나 process substitution으로 전달 — 수 KB 문자열을 셸 명령에 인라인으로 넣지 말 것. JSON 출력을 캡처하고 `run_id`를 run 전체에서 기억.
+
+init은 input_body를 `plan-v1.md`로 저장하고 `state.current_plan_path`를 해당 절대경로로 설정한다. 이후 모든 라운드는 `state.current_plan_path`가 가리키는 파일을 Codex에게 보낸다.
 
 ### Step 4 — Health check (round 0)
 
@@ -236,13 +249,15 @@ eval "$CL health-check --run-id $RID"
 
 > **왜 ScheduleWakeup 안 쓰나:** 어차피 critique-with-codex 외에 할 일이 없고, ScheduleWakeup의 60s clamp 때문에 Codex가 5초 만에 끝나도 60초 헛도는 낭비가 컸음. file-poll이 곧 semantic completion signal이므로 블로킹 wait이 가장 단순하고 빠름.
 
+> **왜 인터랙티브가 기본인가:** Codex critique → Claude plan 수정은 사용자가 결과를 승인해야 의미가 있음. 매 라운드 사용자 게이트가 있으므로 max_rounds 안전장치가 불필요해짐. `--auto`는 자리를 비울 때 또는 배치 목적의 옵트인. 사용자 응답 분류는 키워드 매칭이 아닌 Claude의 자연어 판단으로 처리 — 모호하면 한 번 재질문.
+
 > **⚠ Bash tool timeout 필수 설정.** `wait --timeout N`을 호출할 때 Bash 툴 인보케이션의 timeout을 최소 `(N + 20) * 1000` ms로 설정해야 한다. 안 그러면 외곽 Bash 툴이 wait보다 먼저 죽어서 state가 어중간하게 남는다. 예: `wait --timeout 300` → Bash `timeout: 320000`. 기본 health round은 `--timeout 60` → Bash `timeout: 80000`.
 
-### Step 5 — Round N 루프 (N = 1..max_rounds)
+### Step 5 — Round N 루프
 
-각 라운드:
+인터랙티브 모드와 --auto 모드가 다르게 동작하므로 주의. 두 모드 모두 5a–5d는 동일.
 
-**5a. prior summary 작성.** 이전 비평을 짧은 컨텍스트 블록으로 요약. 간결하게 — Codex는 프롬프트 파일에서 모든 내용을 다시 읽는다:
+**5a. prior summary 작성.** 이전 비평을 짧은 컨텍스트 블록으로 요약:
 
 ```text
 Round 1 verdict: continue (findings 3개, critical 1개)
@@ -250,44 +265,109 @@ Round 1 verdict: continue (findings 3개, critical 1개)
 ... (Codex가 같은 걸 다시 지적하지 않을 만큼만)
 ```
 
-`--prior-summary`로 전달. Round 1은 생략하거나 `""`로.
+`--prior-summary`로 전달. Round 1은 `""`로.
 
 **5b. 프롬프트 작성.**
 
 ```bash
 eval "$CL prompt --run-id $RID --round $N --prior-summary \"$SUMMARY\""
-# {"prompt_path": "/Users/.../cache/critique-with-codex/<rid>/prompt-rN.md"} 반환 (절대경로)
+# {"prompt_path": "..."} 반환 (절대경로). artifact = state.current_plan_path 파일 내용.
 ```
 
 **5c. Push.**
 
 ```bash
-# CLI가 반환한 절대 prompt_path를 payload @ 뒤에 그대로 사용:
 eval "$CL push --target '%N' --payload \"@$PROMPT_PATH [critique-with-codex run=<rid> round=N]\""
 ```
 
-`push`는 `^@[A-Za-z0-9_./-]+ \[critique-with-codex [A-Za-z0-9_=. -]+\]$`에 매칭되지 않는 payload를 거부한다 (절대경로의 `/`는 허용된다). exit code 2가 나오면 payload 구성이 잘못된 것 — 수정할 것. **우회 금지**.
+exit code 2면 payload 구성 오류 — 수정. **우회 금지**.
 
 **5d. 블로킹 wait + check.**
 
 ```bash
 eval "$CL wait --run-id $RID --round $N --timeout 300"
-# state=ready면 파일 다 써진 상태. state=timeout이면 watchdog timeout.
 eval "$CL check --run-id $RID --round $N"
 ```
 
-같은 턴에서 연속 호출. `ScheduleWakeup` 안 쓴다 (Step 4 끝의 박스 참조).
-
 `wait` state에 따른 분기:
 
-| `wait.state` | `check.state` / `verdict` | 액션 |
+| `wait.state` | `verdict` | 액션 |
 |---|---|---|
-| `ready` | `done` / `done` | 조기 종료. 남은 라운드 건너뛰고 Step 6 (합성)으로. |
-| `ready` | `done` / `continue` | `N < max_rounds`이면 round `N+1`로 (5a로 돌아감). `N == max_rounds`이면 Step 6으로, "max rounds 도달, finding 미해결" 명시. |
-| `ready` | `done` / `unknown` | Codex가 비평을 썼지만 마지막 줄이 유효한 `VERDICT:` 지시어가 아님. 보수적으로 `continue`로 처리; 최종 합성에서 파싱 불가 verdict를 사용자에게 표시. |
-| `timeout` | — | **Watchdog timeout**: 사용자에게 `wait.elapsed_s`와 `--resume <rid>` 복구 방법 보고 후 중단. 무한 루프 금지. |
+| `ready` | `done` | **5e → 5f/5g (승인 정책) → Step 6**. done이라도 draft 처리 먼저. |
+| `ready` | `continue` | 5e → 5f/5g → 5h (다음 라운드 또는 종료). |
+| `ready` | `unknown` | 보수적으로 `continue` 처리. 합성에서 표시. |
+| `timeout` | — | Watchdog timeout: `--resume <rid>` 복구 힌트와 함께 중단. |
 
-`wait`의 `reason` 필드도 사용자에게 노출 가치 있음 (`verdict-or-pong` = 정상, `size-stable` = VERDICT 라인 없이 끝남 → 합성에서 표시).
+> **주의:** `done`이어도 5e/5f/5g를 건너뛰면 안 된다. `--auto`에서 approve 없이 Step 6으로 가면 synthesize가 이전 승인본을 final로 보고한다.
+
+**5e. Plan 수정 (항상 수행 — 인터랙티브/auto 공통).**
+
+`critique-rN.md` Read 툴로 읽고:
+- severity별 finding 파악
+- Claude가 plan을 직접 수정 (비판 내용 반영)
+- 수정된 plan 텍스트를 임시 파일(`/tmp/plan-draft-rN.md`)에 저장
+
+```bash
+eval "$CL save-plan-version --run-id $RID --version $((N+1)) \
+  --draft --content-file /tmp/plan-draft-rN.md"
+# {"plan_path": ".../plan-v{N+1}.draft.md", "approved": false} 반환
+```
+
+**5f. 인터랙티브 체크포인트 (interactive=true인 경우만).**
+
+사용자에게 다음을 표시하고 turn 종료:
+
+```
+─── Round N 결과 ───
+
+📋 Codex critique (verdict: continue|done, K findings):
+  • [HIGH] ...
+  • [MED] ...
+
+✏️ Claude 수정사항 (v{N} → v{N+1}.draft):
+  + ...
+  - 보류: ...
+
+📌 draft 위치: {plan_path}
+
+승인 / 수정 요청 / 종료 중 하나로 응답하세요.
+(명시적으로 "approve"/"승인"도 사용 가능)
+```
+
+**5g. 사용자 응답 해석 (다음 turn 시작 시).**
+
+Claude가 자연어로 분류:
+
+| 신호 | 해석 | 액션 |
+|---|---|---|
+| 승인 ("응", "ok", "approve", "좋아", 빈 응답 등) | 사용자 동의 | `save-plan-version --approve` → draft를 `plan-v{N+1}.md`로 확정. 5h로. |
+| 종료 ("stop", "그만", "종료" 등) | 중단 요청 | draft 버림. 현재 `state.current_plan_path` (마지막 승인본)으로 Step 6. |
+| 수정 요청 (그 외 텍스트) | 추가 편집 | draft를 사용자 요청 반영해 다시 수정 → `/tmp/plan-draft-rN.md` 갱신 → `save-plan-version --draft` 재호출 → 5f 반복. |
+| 모호 ("흠", "좋네" 등) | 의도 불분명 | 한 번만 재질문. 두 번째 응답은 위 3가지로 강제 분류. |
+
+**`--auto` 모드 (5f/5g 생략):** 체크포인트 없이 자동 승인.
+
+```bash
+eval "$CL save-plan-version --run-id $RID --version $((N+1)) --approve"
+```
+
+**5h. 라운드 진행 또는 종료 결정.**
+
+5f/5g의 사용자 응답이 "종료"이면 바로 Step 6. 아닌 경우:
+
+- VERDICT=done → Step 6 (합성). (승인은 이미 5g에서 완료)
+- VERDICT=continue + `--auto` + N==max_rounds → **바로 Step 6** (사용자 질문 없이 종료). unattended 목적이므로 추가 라운드 묻지 않음.
+- VERDICT=continue + 인터랙티브 → N++ (사용자 "stop" 신호로만 종료).
+- VERDICT=continue + `--auto` + N < max_rounds → N++, 5a로.
+
+**stop 시 draft 상태 정리 (`--discard`):**
+
+```bash
+eval "$CL save-plan-version --run-id $RID --version $((N+1)) --discard"
+# draft 파일 삭제, awaiting_user_review=false, current_plan_path는 마지막 승인본 유지
+```
+
+`wait`의 `reason` 필드 노출 권장 (`size-stable`이면 합성에서 VERDICT 부재 경고 표시).
 
 ### Step 6 — 합성
 
@@ -295,19 +375,12 @@ eval "$CL check --run-id $RID --round $N"
 eval "$CL synthesize --run-id $RID"
 ```
 
-출력을 사용자에게 그대로 표시한 다음 Claude가 작성한 짧은 후기 추가:
+출력을 사용자에게 표시. synthesize는 plan version chain + 최종 plan 경로 + 모든 critique를 출력한다. **plan 전문은 포함하지 않음 — 파일 경로로 직접 열람.**
 
-- 진행한 라운드 수 vs. max
-- 종료가 조기(verdict=done)였는지, max_rounds 도달이었는지
-- Finding별 **분류** (SPEC §5.5 기본 정책):
-  - `critical`/`high` → **Accepted** (근거가 틀렸으면 → Rejected + 이유 필수)
-  - `medium` → **Accepted** (범위 밖이면 Deferred + 이유)
-  - `low`/`nit` → **Deferred** (즉각 가치가 명백하면 Accepted)
-  - Rejected는 항상 이유 필수. 분류가 모호하면 `AskUserQuestion`으로 1회 (a/r/d) 확인.
-- 산출물 경로: `~/.claude/cache/critique-with-codex/<run_id>/`
+Claude가 짧은 후기 추가:
+- 진행한 라운드 수, 종료 사유 (VERDICT=done / 사용자 stop / max_rounds 도달)
+- 최종 plan 경로 (`state.current_plan_path`)
 - 재실행 방법: `/critique-with-codex --resume <run_id>`
-
-**자동 수정 금지.** v0.1.0의 산출물은 보고서까지; 코드 변경은 범위 밖.
 
 ## 리뷰 외 호출 브랜치
 
@@ -349,11 +422,12 @@ eval "$CL clean"
 
 ### `--resume <run_id>`
 
-1. `eval "$CL state --run-id <run_id>"` → 현재 `round`, `max_rounds`, `codex_pane`, `input_source` 읽기.
-2. run 디렉토리(`~/.claude/cache/critique-with-codex/<run_id>/`)에서 가장 높은 `prompt-rK.md`와 `critique-rK.md` 탐색.
-3. 최신 프롬프트에 대한 `critique-rK.md`가 존재하고 size>0이면 → `check` 호출 후 round K에 대해 Step 5d 분기 계속.
-4. `prompt-rK.md`만 있으면 → 다시 push하고 `wait --round K --timeout 300`.
-5. 둘 다 없으면 (또는 round 0만) → 진행 중이던 라운드를 Step 5b부터 재시작.
+1. `eval "$CL state --run-id <run_id>"` → state.json 전체 읽기.
+2. **`state.awaiting_user_review == true`이면** → "Round N 결과를 다시 보여드릴게요" 후 draft 내용을 요약해 사용자에게 표시. Step 5g(응답 해석)로 바로 진행.
+3. 그 외: run 디렉토리에서 가장 높은 `prompt-rK.md`와 `critique-rK.md` 탐색.
+   - critique-rK.md 존재 + size>0 → `check` 후 Step 5e로 (plan 수정부터).
+   - prompt-rK.md만 존재 → 다시 push + `wait --round K --timeout 300`.
+   - 둘 다 없음 → Step 5b부터 재시작.
 
 Resume은 새 run_id를 만들지 않으며 `init`을 재실행하지 않는다.
 
